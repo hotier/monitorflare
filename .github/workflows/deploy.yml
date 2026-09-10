@@ -181,10 +181,13 @@ jobs:
       # 首次运行配置管理员凭据并写进 Worker secret。
       # 已存在的不覆盖，所以重复部署时密码保持稳定。
       #
-      # 两点说明：
-      #   1) 走 Cloudflare REST API 而不是 `wrangler secret list --json`，
+      # 三点说明：
+      #   1) 列出 secret 走 Cloudflare REST API 而不是 `wrangler secret list --json`，
       #      后者在部分版本会把升级提示混进 stdout，导致 jq 解析失败而整步跳过。
-      #   2) 本仓库是公开仓库，运行摘要/日志任何访客都能看到，
+      #   2) 写入 secret 必须用 `wrangler secret put` 而不是 REST PUT：
+      #      REST PUT 会基于旧的上传记录创建 deployment，把刚部署的新版本
+      #      回滚成旧版本（2026-09 实测：部署后 2 秒被顶回旧版，全站 1101）。
+      #   3) 本仓库是公开仓库，运行摘要/日志任何访客都能看到，
       #      因此这里绝不输出自动生成的密码：管理员密码只能来自 Actions secret。
       - name: Provision admin credentials (first run only)
         working-directory: worker
@@ -206,10 +209,8 @@ jobs:
           EXISTING=$(printf '%s' "$RESP" | jq -r '.result[]?.name // empty')
 
           put_secret() {
-            jq -cn --arg n "$1" --arg v "$2" '{name: $n, value: $v, type: "secret_text"}' \
-              | curl -sS -X PUT -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
-                  -H "Content-Type: application/json" "$API" --data @- \
-              | jq -e '.success' > /dev/null
+            # wrangler secret put 感知 Versions/Deployments API，写入时保留当前部署的代码
+            printf '%s' "$2" | npx wrangler secret put "$1"
           }
 
           if printf '%s\n' "$EXISTING" | grep -qx "ADMIN_API_KEY"; then
