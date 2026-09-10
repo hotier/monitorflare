@@ -17,14 +17,13 @@ jobs:
       - name: tail worker and probe
         run: |
           (npx --yes wrangler@4 tail monitorflare-worker --format=json > /tmp/tail.log 2>&1 &)
-          sleep 35
+          sleep 45
           echo "== probe =="
           curl -sS -o /tmp/resp -w "status=%{http_code}\n" "https://monitorflare-worker.lht1976277790-002.workers.dev/settings" || true
-          head -c 300 /tmp/resp; echo
-          sleep 15
+          head -c 200 /tmp/resp; echo
+          sleep 30
           pkill -f "wrangler tail" || true
-          echo "== tail lines =="
-          wc -l /tmp/tail.log
-          grep -h "^{" /tmp/tail.log | jq -c "{outcome, exceptions: [.exceptions[]? | {name, message}], logs: [.logs[]? | .message]}" | tail -n 8
-          echo "== raw tail =="
-          tail -n 6 /tmp/tail.log
+          echo "== tail size =="
+          wc -c /tmp/tail.log
+          echo "== tail full =="
+          cat /tmp/tail.log
