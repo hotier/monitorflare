@@ -7,7 +7,7 @@
 <a href="https://uptime.csr.plus/"><img src="https://monitorflare.csr.plus/uptime-badge.png" height="28" alt="Uptime Status"></a>
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-**README Languages**: English | [中文](README.zh.md) | [日本語](README.ja.md) | [한국어](README.ko.md) | [Deutsch](README.de.md) | [Français](README.fr.md) | [Italiano](README.it.md) | [Español](README.es.md)
+**README Languages**: English | [中文](README.zh.md)
 
 MonitorFlare is a self-hosted uptime monitoring platform with a beautiful public status page. It runs **completely free** on Cloudflare Workers, D1, and Pages — no servers, no VPS, no monthly costs.
 
@@ -39,7 +39,7 @@ MonitorFlare is a self-hosted uptime monitoring platform with a beautiful public
 - **Private status page** — public or password-protected (SHA-256) with a 7-day unlock token; all public endpoints are guarded (`401 status_page_locked`), changing the password signs everyone out, and an "exit access" button in the footer. Defaults to public for zero-config compatibility
 
 ### 🌍 Internationalization
-- **9 languages**: English · 简体中文 · 繁體中文 · 日本語 · 한국어 · Deutsch · Français · Italiano · Español
+- **2 languages**: English · 简体中文
 - Configurable timezone for all timestamps and alert messages
 
 ### ⚙️ Platform
@@ -74,25 +74,29 @@ Fork this repository and add the following secrets and variables in
 |---|---|---|
 | `CLOUDFLARE_API_TOKEN` | ✅ | Cloudflare API token (Workers / Pages / D1 edit) |
 | `CLOUDFLARE_ACCOUNT_ID` | ✅ | Your Cloudflare account ID |
-| `D1_DATABASE_ID` | ✅ | D1 database ID (create one first under Workers & Pages → D1) |
-| `ADMIN_API_KEY` | ✅ | Admin password for your dashboard |
-| `MAGIC_LINK_SECRET` | optional | Signing key for email magic-link login |
+| `D1_DATABASE_ID` | optional | D1 database ID — created and reused automatically when empty |
+| `ADMIN_API_KEY` | optional | Admin password — generated on the first run, shown in the run summary |
+| `MAGIC_LINK_SECRET` | optional | Signing key for email magic-link login (auto-generated when empty) |
 | `VITE_CF_ANALYTICS_TOKEN` | optional | Cloudflare Web Analytics token |
 
-**Variables**
+Only the first two secrets are required: the workflow creates the D1 database if
+it is missing, writes `WORKER_URL` into the Pages project, and provisions the
+admin credentials on the first run.
 
-| Variable | Example |
+**Variables** (all optional)
+
+| Variable | Default when unset |
 |---|---|
-| `ALLOWED_ORIGIN` | `https://<project>.pages.dev` |
+| `ALLOWED_ORIGIN` | `https://monitorflare.pages.dev` |
 | `SESSION_TTL_HOURS` | `12` |
-| `BASE_URL` | `https://<project>.pages.dev` |
+| `BASE_URL` | `https://monitorflare.pages.dev` |
 | `VITE_FOOTER_AUTHOR` | `MonitorFlare` |
-| `VITE_FOOTER_URL` | `https://github.com/xusteve/MonitorFlare` |
+| `VITE_FOOTER_URL` | `#` |
 
 Push to `main` → both the Worker and the Pages site deploy automatically.
 
-> ⚠️ Make sure `D1_DATABASE_ID` is filled in **before** the first run — the CI
-> script will not backfill it automatically.
+> ℹ️ The admin password generated on the first run is printed **once** in the
+> Actions run summary — save it. Later runs never overwrite it.
 
 ### Option C: Local / manual
 
@@ -137,14 +141,21 @@ Browser / PWA ──► Cloudflare Pages (Vue 3 + i18n + PWA)
 
 ## 🛠 Development
 
-```bash
-# Worker (backend)
-cd worker && npm run dev          # http://127.0.0.1:8787
+One-time setup — generates local config (`worker/wrangler.toml`, `frontend/.env`) and installs dependencies:
 
-# Frontend
-cd frontend && npm run dev        # http://localhost:5173 (proxies /api → 8787)
+```bash
+npm install        # root tooling (concurrently)
+npm run setup      # worker + frontend deps & local config
 ```
 
+Start both services with a single command:
+
+```bash
+npm run dev        # worker → http://127.0.0.1:8787, frontend → http://localhost:5173
+```
+
+> The frontend dev server proxies `/api` to the Worker (`VITE_WORKER_URL`, default `http://127.0.0.1:8787`).
+> To run them separately: `npm run dev:worker` / `npm run dev:frontend`.
 > Requires Node.js ≥ 22.
 
 ---

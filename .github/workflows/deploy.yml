@@ -8,6 +8,9 @@ on:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  WORKER_NAME: monitorflare-worker
+  D1_NAME: monitorflare-db
+  PAGES_PROJECT: monitorflare
 
 jobs:
   # ── 门禁：任何部署前必须先通过 lint / 类型检查 / 测试 ──
@@ -78,39 +81,94 @@ jobs:
         working-directory: worker
         run: npm ci
 
-      # 自动创建 D1 数据库(若不存在),消除手动建库门槛
-      - name: Create D1 database (if not exists)
+      # 只依赖 CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID：
+      # D1 库不存在则自动创建，database_id 从 wrangler 输出中解析后再写入配置。
+      - name: Resolve D1 database id
+        id: d1
         working-directory: worker
-        continue-on-error: true
-        run: npx wrangler d1 create monitorflare-db
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          D1_DATABASE_ID_INPUT: ${{ secrets.D1_DATABASE_ID }}
+        run: |
+          set -euo pipefail
+
+          # 1) 显式提供的 secret 优先
+          if [ -n "${D1_DATABASE_ID_INPUT:-}" ]; then
+            echo "id=$D1_DATABASE_ID_INPUT" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # 2) 已存在的同名库直接复用
+          DB_ID=$(npx wrangler d1 list --json 2>/dev/null \
+            | jq -r --arg name "$D1_NAME" '.[] | select(.name == $name) | .uuid' \
+            | head -n 1 || true)
+
+          # 3) 都没有则创建,并从输出里解析 uuid
+          if [ -z "$DB_ID" ] || [ "$DB_ID" = "null" ]; then
+            npx wrangler d1 create "$D1_NAME" 2>&1 | tee d1-create.log || true
+            DB_ID=$(grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' d1-create.log \
+              | head -n 1 || true)
+          fi
+
+          if [ -z "$DB_ID" ]; then
+            echo "::error::无法创建或解析 D1 数据库 $D1_NAME 的 database_id"
+            exit 1
+          fi
+
+          echo "::notice::使用 D1 数据库 $D1_NAME ($DB_ID)"
+          echo "id=$DB_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve Worker URL
+        id: worker_url
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+
+          SUBDOMAIN=$(curl -sS \
+            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/subdomain" \
+            2>/dev/null | jq -r '.result.subdomain // empty' 2>/dev/null || true)
+
+          if [ -n "$SUBDOMAIN" ]; then
+            echo "url=https://$WORKER_NAME.$SUBDOMAIN.workers.dev" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::未检测到 workers.dev 子域,跳过 WORKER_URL 自动配置"
+            echo "url=" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Generate wrangler.toml
         working-directory: worker
         run: |
-          cat > wrangler.toml << 'WRANGLER_EOF'
-          name = "monitorflare-worker"
+          ALLOWED_ORIGIN="${{ vars.ALLOWED_ORIGIN }}"
+          [ -z "$ALLOWED_ORIGIN" ] && ALLOWED_ORIGIN="https://$PAGES_PROJECT.pages.dev"
+
+          BASE_URL="${{ vars.BASE_URL }}"
+          [ -z "$BASE_URL" ] && BASE_URL="https://$PAGES_PROJECT.pages.dev"
+
+          SESSION_TTL_HOURS="${{ vars.SESSION_TTL_HOURS }}"
+          [ -z "$SESSION_TTL_HOURS" ] && SESSION_TTL_HOURS="12"
+
+          cat > wrangler.toml << WRANGLER_EOF
+          name = "$WORKER_NAME"
           main = "src/index.ts"
           compatibility_date = "2024-02-08"
 
           [triggers]
           crons = ["* * * * *"]
-          WRANGLER_EOF
 
-          echo '' >> wrangler.toml
-          echo '[[d1_databases]]' >> wrangler.toml
-          echo 'binding = "DB"' >> wrangler.toml
-          echo 'database_name = "monitorflare-db"' >> wrangler.toml
-          echo 'database_id = "${{ secrets.D1_DATABASE_ID }}"' >> wrangler.toml
-          echo '' >> wrangler.toml
-          echo '[vars]' >> wrangler.toml
-          echo 'ADMIN_API_KEY = "${{ secrets.ADMIN_API_KEY }}"' >> wrangler.toml
-          echo 'ALLOWED_ORIGIN = "${{ vars.ALLOWED_ORIGIN }}"' >> wrangler.toml
-          echo 'SESSION_TTL_HOURS = "${{ vars.SESSION_TTL_HOURS }}"' >> wrangler.toml
-          echo 'MAGIC_LINK_SECRET = "${{ secrets.MAGIC_LINK_SECRET }}"' >> wrangler.toml
-          echo 'BASE_URL = "${{ vars.BASE_URL }}"' >> wrangler.toml
+          [[d1_databases]]
+          binding = "DB"
+          database_name = "$D1_NAME"
+          database_id = "${{ steps.d1.outputs.id }}"
+
+          [vars]
+          ALLOWED_ORIGIN = "$ALLOWED_ORIGIN"
+          SESSION_TTL_HOURS = "$SESSION_TTL_HOURS"
+          BASE_URL = "$BASE_URL"
+          WRANGLER_EOF
 
       - name: Deploy Worker
         uses: cloudflare/wrangler-action@v3
@@ -119,6 +177,50 @@ jobs:
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: worker
           command: deploy
+
+      # 首次运行自动生成管理员凭据并写进 Worker secret。
+      # 已存在的不覆盖，所以重复部署时密码保持稳定。
+      - name: Provision admin credentials (first run only)
+        working-directory: worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          ADMIN_API_KEY_INPUT: ${{ secrets.ADMIN_API_KEY }}
+        run: |
+          set -euo pipefail
+
+          # 读不到现状时保守跳过,避免误覆盖已有密码
+          if ! EXISTING=$(npx wrangler secret list --json 2>/dev/null | jq -r '.[].name' 2>/dev/null); then
+            echo "::warning::无法读取现有 secrets,跳过凭据生成"
+            exit 0
+          fi
+
+          if printf '%s\n' "$EXISTING" | grep -qx "ADMIN_API_KEY"; then
+            echo "::notice::ADMIN_API_KEY 已存在,保持不变"
+          elif [ -n "${ADMIN_API_KEY_INPUT:-}" ]; then
+            printf '%s' "$ADMIN_API_KEY_INPUT" | npx wrangler secret put ADMIN_API_KEY
+          else
+            ADMIN_KEY=$(openssl rand -hex 24)
+            printf '%s' "$ADMIN_KEY" | npx wrangler secret put ADMIN_API_KEY
+            {
+              echo "## MonitorFlare 管理员密码"
+              echo ""
+              echo "仅本次显示，请立即保存（后续部署不会覆盖它）："
+              echo ""
+              echo '```'
+              echo "$ADMIN_KEY"
+              echo '```'
+              echo ""
+              echo "更换方式：Cloudflare Dashboard → Workers → $WORKER_NAME → Settings → Variables and Secrets，"
+              echo "或本地执行 \`npx wrangler secret put ADMIN_API_KEY\`。"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          if printf '%s\n' "$EXISTING" | grep -qx "MAGIC_LINK_SECRET"; then
+            echo "::notice::MAGIC_LINK_SECRET 已存在,保持不变"
+          else
+            openssl rand -hex 32 | npx wrangler secret put MAGIC_LINK_SECRET
+          fi
 
   deploy-pages:
     name: Deploy Pages (Frontend)
@@ -154,11 +256,66 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages project create monitorflare --production-branch=main
+          command: pages project create ${{ env.PAGES_PROJECT }} --production-branch=main
+
+      - name: Resolve Worker URL
+        id: worker_url
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+
+          SUBDOMAIN=$(curl -sS \
+            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/subdomain" \
+            2>/dev/null | jq -r '.result.subdomain // empty' 2>/dev/null || true)
+
+          if [ -n "$SUBDOMAIN" ]; then
+            echo "url=https://$WORKER_NAME.$SUBDOMAIN.workers.dev" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::未检测到 workers.dev 子域,跳过 WORKER_URL 自动配置"
+            echo "url=" >> "$GITHUB_OUTPUT"
+          fi
+
+      # _worker.js 靠 Pages 项目的 WORKER_URL 反向代理 /api/*,
+      # 这一步通过 API 写入,免去手动配置(Dashboard 里也能改,但会被这里覆盖成同一值)。
+      - name: Configure Pages environment variables
+        if: steps.worker_url.outputs.url != ''
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+
+          SITE_ORIGIN="${{ vars.ALLOWED_ORIGIN }}"
+          [ -z "$SITE_ORIGIN" ] && SITE_ORIGIN="https://$PAGES_PROJECT.pages.dev"
+
+          API="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/pages/projects/$PAGES_PROJECT"
+
+          # 先取现有变量再合并,避免清掉手动加的其它配置
+          CURRENT=$(curl -sS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$API" \
+            | jq -c '.result.deployment_configs.production.env_vars // {}')
+
+          ENV_VARS=$(jq -cn \
+            --argjson cur "$CURRENT" \
+            --arg worker "${{ steps.worker_url.outputs.url }}" \
+            --arg origin "$SITE_ORIGIN" \
+            '$cur + {WORKER_URL: {value: $worker}, ALLOWED_ORIGIN: {value: $origin}}')
+
+          BODY=$(jq -cn --argjson vars "$ENV_VARS" \
+            '{deployment_configs: {production: {env_vars: $vars}, preview: {env_vars: $vars}}}')
+
+          curl -sS -X PATCH \
+            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            -H "Content-Type: application/json" \
+            "$API" -d "$BODY" | jq -e '.success' > /dev/null
+
+          echo "::notice::已写入 Pages 环境变量 WORKER_URL=${{ steps.worker_url.outputs.url }}"
 
       - name: Deploy to Cloudflare Pages
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages deploy frontend/dist --project-name=monitorflare --branch=main --commit-dirty=true
+          command: pages deploy frontend/dist --project-name=${{ env.PAGES_PROJECT }} --branch=main --commit-dirty=true

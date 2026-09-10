@@ -6,7 +6,7 @@
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/xusteve/MonitorFlare)
 <a href="https://uptime.csr.plus/"><img src="https://monitorflare.csr.plus/uptime-badge.png" height="28" alt="Uptime Status"></a>
 
-**README 语言**: [English](README.md) | 中文 | [日本語](README.ja.md) | [한국어](README.ko.md) | [Deutsch](README.de.md) | [Français](README.fr.md) | [Italiano](README.it.md) | [Español](README.es.md)
+**README 语言**: [English](README.md) | 中文
 
 ---
 
@@ -36,7 +36,7 @@
 - **私密状态页** — 公开或密码保护(SHA-256)+ 7 天解锁 token；全部公开接口受保护(`401 status_page_locked`)、改密码全员登出、footer 退出访问按钮。默认公开，零配置兼容
 
 ### 国际化
-- **9 种语言**:English · 简体中文 · 繁體中文 · 日本語 · 한국어 · Deutsch · Français · Italiano · Español
+- **2 种语言**:English · 简体中文
 - 所有时间戳与告警可配置时区
 
 ### 平台
@@ -68,14 +68,18 @@ Fork 本仓库,然后添加 secrets:
 |---|---|---|
 | `CLOUDFLARE_API_TOKEN` | ✅ | Cloudflare API token (Workers/Pages/D1 edit) |
 | `CLOUDFLARE_ACCOUNT_ID` | ✅ | Cloudflare account ID |
-| `D1_DATABASE_ID` | ✅ | D1 database ID |
-| `ADMIN_API_KEY` | ✅ | Admin password |
-| `MAGIC_LINK_SECRET` | optional | Magic link signing key |
+| `D1_DATABASE_ID` | optional | D1 database ID,留空则自动创建/复用 |
+| `ADMIN_API_KEY` | optional | Admin password,首次部署自动生成并显示在运行摘要里 |
+| `MAGIC_LINK_SECRET` | optional | Magic link signing key,留空自动生成 |
 | `VITE_CF_ANALYTICS_TOKEN` | optional | Cloudflare Web Analytics |
 
-Vars: `ALLOWED_ORIGIN`, `SESSION_TTL_HOURS`, `BASE_URL`, `VITE_FOOTER_AUTHOR`, `VITE_FOOTER_URL`
+只有前两个是必需的:workflow 会在 D1 库缺失时自动创建,并把 `WORKER_URL` 写入 Pages 项目。
+
+Vars(均可选,留空用默认值):`ALLOWED_ORIGIN`(默认 `https://monitorflare.pages.dev`)、`SESSION_TTL_HOURS`(默认 `12`)、`BASE_URL`(默认 `https://monitorflare.pages.dev`)、`VITE_FOOTER_AUTHOR`(默认 `MonitorFlare`)、`VITE_FOOTER_URL`(默认 `#`)
 
 推送到 `main` → Worker 与 Pages 自动部署。
+
+> ℹ️ 首次部署生成的管理员密码**只显示一次**,在 Actions 运行摘要里,请立即保存;后续部署不会覆盖它。
 
 ### 方式 C:本地 / 手动
 
@@ -120,13 +124,22 @@ Browser / PWA ──► Cloudflare Pages (Vue 3 + i18n + PWA)
 
 ## 🛠 开发
 
-```bash
-# Worker (backend)
-cd worker && npm run dev          # http://127.0.0.1:8787
+首次准备:生成本地配置(`worker/wrangler.toml`、`frontend/.env`)并安装依赖:
 
-# Frontend
-cd frontend && npm run dev        # http://localhost:5173 (proxies /api → 8787)
+```bash
+npm install        # 根目录工具链(concurrently)
+npm run setup      # 安装 worker + frontend 依赖并生成本地配置
 ```
+
+一键启动前后端:
+
+```bash
+npm run dev        # worker → http://127.0.0.1:8787,前端 → http://localhost:5173
+```
+
+> 前端开发服务器会把 `/api` 代理到 Worker(`VITE_WORKER_URL`,默认 `http://127.0.0.1:8787`)。
+> 如需分别启动:`npm run dev:worker` / `npm run dev:frontend`。
+> 需要 Node.js ≥ 22。
 
 ## 📄 License
 
