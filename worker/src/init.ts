@@ -4,6 +4,7 @@
 // 使一键部署无需手动执行 schema.sql
 // ============================================================
 import type { Bindings } from './types';
+import { DEFAULT_TZ } from './datetime';
 
 const INIT_STATEMENTS: string[] = [
   `CREATE TABLE IF NOT EXISTS monitors (
@@ -85,7 +86,7 @@ export const DEFAULT_SETTINGS: Record<string, string> = {
   site_description: 'Realtime monitoring & status page',
   site_logo_url: '/logo.svg',
   language: 'zh',
-  timezone: 'Asia/Shanghai',
+  timezone: DEFAULT_TZ,
   theme: 'dark',
   status_page_feed: '1',
   status_page_visibility: 'public',
@@ -118,6 +119,14 @@ export async function ensureInitialized(env: Bindings): Promise<boolean> {
         await ensureColumn(env, 'monitors', 'cert_expiry', 'TEXT');
         await ensureColumn(env, 'monitors', 'domain_expiry', 'TEXT');
         await ensureColumn(env, 'monitors', 'check_info_status', 'TEXT');
+        // 一次性迁移:每日聚合口径由 UTC 改为"设置时区"后,旧的分桶键不再对得上
+        // (例如上海 11 号凌晨的检查曾被记成 10 号)。daily_uptime 是可由 logs 重建的
+        // 派生缓存,直接清空,交给公开接口的兜底回填按新口径重新生成。
+        if ((await getSetting(env, 'daily_uptime_tz_v1')) !== '1') {
+          await env.DB.prepare('DELETE FROM daily_uptime').run();
+          await env.DB.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
+            .bind('daily_uptime_tz_v1', '1').run();
+        }
         return true;
       } catch (e) {
         console.error('Init failed:', e);
@@ -143,6 +152,11 @@ async function ensureColumn(env: Bindings, table: string, column: string, ddl: s
 export async function getSetting(env: Bindings, key: string): Promise<string> {
   const row = await env.DB.prepare('SELECT value FROM settings WHERE key = ?').bind(key).first<{ value: string }>();
   return row?.value ?? '';
+}
+
+/** 取设置里的时区(缺失/非法时回退默认值),全站"按天"口径以它为准 */
+export async function getTimezone(env: Bindings): Promise<string> {
+  return (await getSetting(env, 'timezone')) || DEFAULT_TZ;
 }
 
 export async function getSettingsMap(env: Bindings): Promise<Record<string, string>> {

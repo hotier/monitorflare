@@ -115,7 +115,7 @@ INSERT OR IGNORE INTO settings (key, value) VALUES ('site_title', 'MonitorFlare'
 INSERT OR IGNORE INTO settings (key, value) VALUES ('site_description', 'Realtime monitoring & status page');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('site_logo_url', '');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('language', 'en');
-INSERT OR IGNORE INTO settings (key, value) VALUES ('timezone', 'UTC');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('timezone', 'Asia/Shanghai');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('theme', 'dark');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('status_page_feed', '1');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('alert_template_down', 'Error: {reason}');

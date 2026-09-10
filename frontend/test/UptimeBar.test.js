@@ -17,6 +17,7 @@ const mountBar = (monitor, days) =>
 const cells = (wrapper) => wrapper.findAll('.uptime-bar-cell');
 
 beforeEach(() => {
+  localStorage.clear();
   vi.useFakeTimers();
   vi.setSystemTime(NOW);
 });
@@ -107,5 +108,24 @@ describe('UptimeBar', () => {
     const wrapper = mountBar({ daily_stats: [], uptime_30d: 99.95 });
     expect(wrapper.html()).not.toContain('uptimeBar.last30d');
     expect(wrapper.html()).toContain('uptimeBar.daysAgo');
+  });
+
+  it('创建日按应用时区归日,UTC 的前一天不算成创建日', () => {
+    // 上海 2026-09-11 01:30 创建 → 落库为 UTC 2026-09-10 17:30
+    vi.setSystemTime(new Date('2026-09-11T02:00:00Z')); // 上海 09-11 10:00
+    const wrapper = mountBar({ daily_stats: [], created_at: '2026-09-10 17:30:00' }, 7);
+
+    // 创建日就是今天 → 只画 1 格,左端文案应为 09-11 而非 09-10
+    expect(wrapper.findAll('.uptime-bar-fill').length).toBe(1);
+    expect(wrapper.html()).toContain('09-11');
+    expect(wrapper.html()).not.toContain('09-10');
+  });
+
+  it('日期轴跟随配置的时区', () => {
+    vi.setSystemTime(new Date('2024-03-05T20:00:00Z')); // 上海 03-06,UTC 仍是 03-05
+    localStorage.setItem('monitorflare_tz', 'UTC');
+
+    const tooltips = mountBar({ daily_stats: [] }).findAll('.uptime-tooltip').map((n) => n.text());
+    expect(tooltips[89].startsWith('2024-03-05')).toBe(true);
   });
 });

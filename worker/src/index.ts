@@ -5,11 +5,12 @@
 import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { cors } from 'hono/cors';
-import type { Bindings, CheckResult, Incident, Monitor, NotificationChannel, Subscription } from './types';
-import { performCheck, updateDomainCertInfo, normalizeMonitorUrl } from './checks';
+import type { Bindings, Incident, Monitor, NotificationChannel } from './types';
+import { updateDomainCertInfo, normalizeMonitorUrl } from './checks';
 import { sendToChannel, CHANNEL_TYPES, EMAIL_PROVIDERS } from './channels';
-import { buildAlertMessage, isSupportedLang, type Lang } from './i18n';
-import { ensureInitialized, getSetting, getSettingsMap, DEFAULT_SETTINGS } from './init';
+import { buildAlertMessage, isSupportedLang } from './i18n';
+import { ensureInitialized, getSetting, getTimezone, getSettingsMap, DEFAULT_SETTINGS } from './init';
+import { localDateString, tzModifier } from './datetime';
 import {
   createSessionToken, createOAuthState, verifyOAuthState, verifySessionToken,
   verifyAdminCredential, verifyMagicLinkToken, createMagicLinkToken,
@@ -18,16 +19,13 @@ import {
 } from './auth';
 import {
   getAllowedOrigins, isLocalOrigin, getAuthSecret, isValidEmail,
-  maskChannelConfig, formatTimeInTz, randomToken, safeEqual, maskSecret,
+  maskChannelConfig, formatTimeInTz, randomToken, safeEqual,
 } from './utils';
-
-const MONITOR_COLUMNS = `
-  id, name, url, type, config, method, request_headers, request_body, interval, status,
-  retry_count, last_check, keyword, user_agent, tags, domain_expiry, cert_expiry,
-  check_info_status, paused, check_ssl, check_domain, alert_silence_uptime,
-  alert_silence_ssl, alert_silence_domain, alert_error_rate, alert_after_failures,
-  last_alert_uptime, last_alert_ssl, last_alert_domain, sort_order, created_at
-`;
+import { MONITOR_COLUMNS } from './sql';
+import { escapeXml, safeCompare, maskMonitorSensitive, isSensitiveSettingKey } from './utils/http';
+import { runScheduledTasks, performMonitorCheck } from './scheduler';
+import { sendAlertToAllChannels } from './services/alert';
+import { notifySubscribers, getEmailConfigForLogin, sendLoginEmail } from './services/email';
 
 // ============================================================
 // Hono 应用
@@ -289,6 +287,10 @@ app.get('/monitors/public/details', async (c) => {
     ).all();
     if (!monitors || monitors.length === 0) return c.json({ monitors: [] });
 
+    // 全站"按天"口径:跟随设置里的时区(默认 Asia/Shanghai),与每日聚合、前端日期轴一致
+    const tz = await getTimezone(c.env);
+    const tzMod = tzModifier(tz);
+
     await c.env.DB.prepare(`CREATE TABLE IF NOT EXISTS daily_uptime (
       monitor_id INTEGER NOT NULL, date TEXT NOT NULL,
       total_checks INTEGER DEFAULT 0, successful_checks INTEGER DEFAULT 0,
@@ -299,16 +301,17 @@ app.get('/monitors/public/details', async (c) => {
     if (cnt && cnt.c === 0) {
       await c.env.DB.prepare(`
         INSERT OR IGNORE INTO daily_uptime (monitor_id, date, total_checks, successful_checks, avg_latency)
-        SELECT monitor_id, date(created_at), COUNT(*), SUM(CASE WHEN is_fail=0 THEN 1 ELSE 0 END),
+        SELECT monitor_id, date(created_at, '${tzMod}'), COUNT(*), SUM(CASE WHEN is_fail=0 THEN 1 ELSE 0 END),
                COALESCE(CAST(AVG(CASE WHEN is_fail=0 THEN latency END) AS INTEGER), 0)
         FROM logs
-        WHERE created_at >= date('now','-90 days') AND created_at < date('now')
-        GROUP BY monitor_id, date(created_at)
+        WHERE date(created_at, '${tzMod}') >= date('now', '${tzMod}', '-90 days')
+          AND date(created_at, '${tzMod}') < date('now', '${tzMod}')
+        GROUP BY monitor_id, date(created_at, '${tzMod}')
       `).run();
     }
 
     const { results: dailyRows } = await c.env.DB.prepare(
-      "SELECT monitor_id, date, total_checks, successful_checks FROM daily_uptime WHERE date >= date('now','-90 days') ORDER BY monitor_id, date"
+      `SELECT monitor_id, date, total_checks, successful_checks FROM daily_uptime WHERE date >= date('now', '${tzMod}', '-90 days') ORDER BY monitor_id, date`
     ).all();
     const { results: liveRows } = await c.env.DB.prepare(`
       SELECT monitor_id,
@@ -322,14 +325,14 @@ app.get('/monitors/public/details', async (c) => {
     const { results: latRows } = await c.env.DB.prepare(
       'SELECT monitor_id, latency FROM logs WHERE is_fail=0 ORDER BY created_at DESC LIMIT 200'
     ).all();
-    // 当天数据在 daily_uptime 里要么缺失,要么只是聚合时刻(UTC 02:00)的陈旧快照 → 从 logs 实时重算
+    // 当天数据在 daily_uptime 里要么缺失,要么只是聚合时刻的陈旧快照 → 从 logs 实时重算
     const { results: todayRows } = await c.env.DB.prepare(`
       SELECT monitor_id, COUNT(*) as t, SUM(CASE WHEN is_fail=0 THEN 1 ELSE 0 END) as s
-      FROM logs WHERE created_at >= date('now') GROUP BY monitor_id
+      FROM logs WHERE date(created_at, '${tzMod}') >= date('now', '${tzMod}') GROUP BY monitor_id
     `).all();
 
     type DS = { date: string; up: number; total: number };
-    const todayDate = new Date().toISOString().slice(0, 10);
+    const todayDate = localDateString(tz);
     const dMap = new Map<number, DS[]>();
     for (const r of dailyRows || []) {
       if (r.date === todayDate) continue;
@@ -380,6 +383,10 @@ app.get('/monitors/public/:id', async (c) => {
     ).bind(id).first();
     if (!monitor) return c.json({ error: 'Monitor not found' }, 404);
 
+    // 全站"按天"口径:跟随设置里的时区(默认 Asia/Shanghai),与每日聚合、前端日期轴一致
+    const tz = await getTimezone(c.env);
+    const tzMod = tzModifier(tz);
+
     await c.env.DB.prepare(`CREATE TABLE IF NOT EXISTS daily_uptime (
       monitor_id INTEGER NOT NULL, date TEXT NOT NULL,
       total_checks INTEGER DEFAULT 0, successful_checks INTEGER DEFAULT 0,
@@ -390,16 +397,17 @@ app.get('/monitors/public/:id', async (c) => {
     if (cnt && cnt.c === 0) {
       await c.env.DB.prepare(`
         INSERT OR IGNORE INTO daily_uptime (monitor_id, date, total_checks, successful_checks, avg_latency)
-        SELECT monitor_id, date(created_at), COUNT(*), SUM(CASE WHEN is_fail=0 THEN 1 ELSE 0 END),
+        SELECT monitor_id, date(created_at, '${tzMod}'), COUNT(*), SUM(CASE WHEN is_fail=0 THEN 1 ELSE 0 END),
                COALESCE(CAST(AVG(CASE WHEN is_fail=0 THEN latency END) AS INTEGER), 0)
         FROM logs
-        WHERE created_at >= date('now','-90 days') AND created_at < date('now')
-        GROUP BY monitor_id, date(created_at)
+        WHERE date(created_at, '${tzMod}') >= date('now', '${tzMod}', '-90 days')
+          AND date(created_at, '${tzMod}') < date('now', '${tzMod}')
+        GROUP BY monitor_id, date(created_at, '${tzMod}')
       `).run();
     }
 
     const { results: dailyRows } = await c.env.DB.prepare(
-      'SELECT date, total_checks, successful_checks FROM daily_uptime WHERE monitor_id = ? AND date >= date(\'now\',\'-90 days\') ORDER BY date'
+      `SELECT date, total_checks, successful_checks FROM daily_uptime WHERE monitor_id = ? AND date >= date('now', '${tzMod}', '-90 days') ORDER BY date`
     ).bind(id).all();
 
     const upt = await c.env.DB.prepare(`
@@ -414,10 +422,10 @@ app.get('/monitors/public/:id', async (c) => {
     `).bind(id).first();
 
     const d90 = await c.env.DB.prepare(
-      "SELECT SUM(total_checks) as t, SUM(successful_checks) as s FROM daily_uptime WHERE monitor_id = ? AND date >= date('now','-90 days') AND date < date('now')"
+      `SELECT SUM(total_checks) as t, SUM(successful_checks) as s FROM daily_uptime WHERE monitor_id = ? AND date >= date('now', '${tzMod}', '-90 days') AND date < date('now', '${tzMod}')`
     ).bind(id).first();
     const today = await c.env.DB.prepare(
-      "SELECT COUNT(*) as t, SUM(CASE WHEN is_fail=0 THEN 1 ELSE 0 END) as s FROM logs WHERE monitor_id = ? AND created_at >= date('now')"
+      `SELECT COUNT(*) as t, SUM(CASE WHEN is_fail=0 THEN 1 ELSE 0 END) as s FROM logs WHERE monitor_id = ? AND date(created_at, '${tzMod}') >= date('now', '${tzMod}')`
     ).bind(id).first();
 
     const pct = (t?: number, s?: number) => t && t > 0 ? Number(((s! / t) * 100).toFixed(1)) : null;
@@ -451,8 +459,8 @@ app.get('/monitors/public/:id', async (c) => {
       return inc.affected_monitors.split(',').map(x => x.trim()).filter(Boolean).includes(String(id));
     });
 
-    // 当天数据在 daily_uptime 里要么缺失,要么只是聚合时刻(UTC 02:00)的陈旧快照 → 从 logs 实时重算
-    const todayDate = new Date().toISOString().slice(0, 10);
+    // 当天数据在 daily_uptime 里要么缺失,要么只是聚合时刻的陈旧快照 → 从 logs 实时重算
+    const todayDate = localDateString(tz);
     const todayTotal = (today?.t as number) || 0;
     const dailyStats = (dailyRows || [])
       .filter(r => r.date !== todayDate)
@@ -519,17 +527,31 @@ app.post('/monitors', async (c) => {
     ).run();
 
     const newId = result.meta.last_row_id as number;
-    if (type === 'http' && (body.check_ssl !== 0 || body.check_domain !== 0)) {
-      c.executionCtx.waitUntil((async () => {
+
+    // 创建后的首次初始化:立刻探测一次,让新监控马上就有延迟/状态数据,
+    // 而不必等到下一个调度周期(最长可能是一整个 interval)。与证书/域名抓取串行执行。
+    c.executionCtx.waitUntil((async () => {
+      const { results } = await c.env.DB.prepare(`SELECT ${MONITOR_COLUMNS} FROM monitors WHERE id = ?`)
+        .bind(newId).all<Monitor>();
+      const created = results[0];
+      if (!created) return;
+
+      // 1) 首次探测(暂停中的监控跳过)
+      if (created.paused !== 1) {
+        try { await performMonitorCheck(created, c.env); }
+        catch (err) { console.error('Initial check failed:', err); }
+      }
+
+      // 2) 首次抓取证书/域名信息
+      if (type === 'http' && (body.check_ssl !== 0 || body.check_domain !== 0)) {
         try {
           await c.env.DB.prepare('UPDATE monitors SET check_info_status = ? WHERE id = ?')
             .bind(new Date().toISOString(), newId).run();
-          const { results } = await c.env.DB.prepare(`SELECT ${MONITOR_COLUMNS} FROM monitors WHERE id = ?`)
-            .bind(newId).all<Monitor>();
-          if (results[0]) await updateDomainCertInfo(c.env, results[0]);
+          await updateDomainCertInfo(c.env, created);
         } catch (err) { console.error('Initial cert check failed:', err); }
-      })());
-    }
+      }
+    })());
+
     return c.json({ success: true, id: newId }, 201);
   } catch (e: unknown) {
     return c.json({ error: e instanceof Error ? e.message : 'Unknown error' }, 500);
@@ -827,10 +849,32 @@ app.put('/settings', async (c) => {
 
 app.get('/health', async (c) => {
   try {
-    const row = await c.env.DB.prepare('SELECT 1 as ok').first();
-    return c.json({ status: 'ok', db: !!row, ok: !!row });
+    // 系统状态栏所需的全部指标:批量一次往返取完,避免多次查询往返
+    // MAX(created_at) 走 idx_logs_created、MAX(date) 走 daily_uptime 主键,均为索引直取
+    const [probe, logs, channels, daily, lastLog] = await c.env.DB.batch([
+      c.env.DB.prepare('SELECT 1 as ok'),
+      c.env.DB.prepare('SELECT COUNT(*) as c FROM logs'),
+      c.env.DB.prepare('SELECT COUNT(*) as c FROM notification_channels WHERE enabled = 1'),
+      c.env.DB.prepare('SELECT MAX(date) as d FROM daily_uptime'),
+      c.env.DB.prepare('SELECT MAX(created_at) as t FROM logs'),
+    ]);
+    const logsRow = logs.results?.[0] as { c: number } | undefined;
+    const channelsRow = channels.results?.[0] as { c: number } | undefined;
+    const dailyRow = daily.results?.[0] as { d: string | null } | undefined;
+    const lastLogRow = lastLog.results?.[0] as { t: string | null } | undefined;
+    return c.json({
+      status: 'ok', ok: true, db: !!probe.results?.[0],
+      logs: logsRow?.c ?? 0,
+      enabled_channels: channelsRow?.c ?? 0,
+      latest_daily_uptime: dailyRow?.d ?? null,
+      latest_log_at: lastLogRow?.t ?? null,
+    });
   } catch (e: unknown) {
-    return c.json({ status: 'error', db: false, ok: false, error: e instanceof Error ? e.message : 'Unknown error' }, 500);
+    return c.json({
+      status: 'error', ok: false, db: false,
+      logs: 0, enabled_channels: 0, latest_daily_uptime: null, latest_log_at: null,
+      error: e instanceof Error ? e.message : 'Unknown error',
+    }, 500);
   }
 });
 
@@ -977,27 +1021,6 @@ app.delete('/api-keys/:id', async (c) => {
 // 完整数据 API(/api/v1,需 API key 或 admin token)
 // ============================================================
 
-// 脱敏:掩码监控请求头中的敏感字段
-function maskMonitorSensitive(monitor: Record<string, unknown>): Record<string, unknown> {
-  if (monitor.request_headers && typeof monitor.request_headers === 'string') {
-    try {
-      const headers = JSON.parse(monitor.request_headers) as Record<string, string>;
-      const masked: Record<string, string> = {};
-      for (const [k, v] of Object.entries(headers)) {
-        masked[k] = ['authorization', 'token', 'api-key', 'apikey', 'password', 'cookie', 'x-api-key'].some(s => k.toLowerCase().includes(s)) ? maskSecret(v) : v;
-      }
-      return { ...monitor, request_headers: JSON.stringify(masked) };
-    } catch { /* keep as is */ }
-  }
-  return monitor;
-}
-
-// 敏感设置 key(导出时排除)
-const SENSITIVE_SETTING_KEYS = ['status_page_password'];
-function isSensitiveSettingKey(key: string): boolean {
-  return SENSITIVE_SETTING_KEYS.includes(key) || /(password|secret|token|api[_-]?key)/i.test(key);
-}
-
 // /api/v1 子应用(同时挂载到 /api/v1 与 /v1,兼容 Pages 代理路径)
 const v1App = new Hono<{ Bindings: Bindings }>();
 
@@ -1048,7 +1071,9 @@ v1App.get('/incidents', async (c) => {
 v1App.get('/uptime', async (c) => {
   try {
     const days = Math.min(Math.max(Number(c.req.query('days') || 30), 1), 365);
-    const sinceDate = `date('now','-${days - 1} days')`;
+    // 与每日聚合同一口径:按设置时区切天
+    const tzMod = tzModifier(await getTimezone(c.env));
+    const sinceDate = `date('now', '${tzMod}', '-${days - 1} days')`;
     const { results: daily } = await c.env.DB.prepare(
       `SELECT monitor_id, date, total_checks, successful_checks, avg_latency FROM daily_uptime WHERE date >= ${sinceDate} ORDER BY monitor_id, date`
     ).all();
@@ -1080,7 +1105,8 @@ v1App.get('/export', async (c) => {
     const { results: monitors } = await c.env.DB.prepare(`SELECT ${MONITOR_COLUMNS} FROM monitors ORDER BY sort_order ASC`).all();
     const { results: logs } = await c.env.DB.prepare('SELECT id, monitor_id, status_code, latency, is_fail, reason, created_at FROM logs ORDER BY created_at DESC LIMIT ?').bind(limit).all();
     const { results: incidents } = await c.env.DB.prepare('SELECT * FROM incidents ORDER BY created_at DESC LIMIT 1000').all();
-    const { results: uptime } = await c.env.DB.prepare("SELECT monitor_id, date, total_checks, successful_checks, avg_latency FROM daily_uptime WHERE date >= date('now','-90 days') ORDER BY monitor_id, date").all();
+    const tzMod = tzModifier(await getTimezone(c.env));
+    const { results: uptime } = await c.env.DB.prepare(`SELECT monitor_id, date, total_checks, successful_checks, avg_latency FROM daily_uptime WHERE date >= date('now', '${tzMod}', '-90 days') ORDER BY monitor_id, date`).all();
     const { results: settings } = await c.env.DB.prepare('SELECT key, value FROM settings').all<{ key: string; value: string }>();
     const { results: channels } = await c.env.DB.prepare('SELECT id, type, name, enabled, config, created_at FROM notification_channels').all();
 
@@ -1329,271 +1355,11 @@ app.post('/webhooks/:token', async (c) => {
 });
 
 // ============================================================
-// 调度(定时任务)
-// ============================================================
-async function checkSites(env: Bindings) {
-  console.log('Starting scheduled check...');
-  const now = Date.now();
-  const { results } = await env.DB.prepare(`
-    SELECT ${MONITOR_COLUMNS} FROM monitors
-  `).all<Monitor>();
-  const tasks = results.map(async (monitor) => {
-    if (monitor.paused === 1) return;
-    if (isTimeToCheck(monitor, now)) await performMonitorCheck(monitor, env);
-  });
-  await Promise.all(tasks);
-}
-
-function isTimeToCheck(monitor: Monitor, now: number): boolean {
-  if (monitor.status === 'RETRYING') return true;
-  const lastCheck = monitor.last_check ? new Date(monitor.last_check).getTime() : 0;
-  const intervalMs = (monitor.interval || 300) * 1000;
-  return now - lastCheck >= intervalMs;
-}
-
-async function performMonitorCheck(monitor: Monitor, env: Bindings) {
-  const result: CheckResult = await performCheck(monitor, env);
-
-  // 写日志
-  await env.DB.prepare('INSERT INTO logs (monitor_id, status_code, latency, is_fail, reason) VALUES (?, ?, ?, ?, ?)')
-    .bind(monitor.id, result.statusCode, result.latency, result.ok ? 0 : 1, result.reason || null).run();
-
-  // 刷新 HTTP 监控的证书/域名信息(24h)
-  if (monitor.type === 'http') {
-    const lastInfoCheck = monitor.check_info_status ? new Date(monitor.check_info_status).getTime() : 0;
-    if (Date.now() - lastInfoCheck > 86400000) {
-      await env.DB.prepare('UPDATE monitors SET check_info_status = ? WHERE id = ?')
-        .bind(new Date().toISOString(), monitor.id).run();
-      await updateDomainCertInfo(env, monitor);
-    }
-  }
-
-  // 状态机: 连续失败计数 → 告警
-  const afterFailures = Math.max(1, monitor.alert_after_failures || 1);
-  const lang = isSupportedLang(await getSetting(env, 'language'));
-  const tz = await getSetting(env, 'timezone') || 'Asia/Shanghai';
-
-  if (!result.ok) {
-    const newRetry = (monitor.retry_count || 0) + 1;
-    if (newRetry >= afterFailures && monitor.status === 'UP') {
-      await env.DB.prepare('UPDATE monitors SET status = ?, retry_count = ?, last_check = ? WHERE id = ?')
-        .bind('DOWN', 0, new Date().toISOString(), monitor.id).run();
-      await sendUptimeAlert(env, monitor, 'DOWN', result.reason, lang, tz);
-    } else {
-      await env.DB.prepare('UPDATE monitors SET status = ?, retry_count = ?, last_check = ? WHERE id = ?')
-        .bind('RETRYING', newRetry, new Date().toISOString(), monitor.id).run();
-    }
-  } else {
-    if (monitor.status === 'DOWN' || monitor.status === 'RETRYING') {
-      await env.DB.prepare('UPDATE monitors SET status = ?, retry_count = ?, last_check = ? WHERE id = ?')
-        .bind('UP', 0, new Date().toISOString(), monitor.id).run();
-      await sendUptimeAlert(env, monitor, 'UP', result.reason || `Response time: ${result.latency}ms`, lang, tz);
-    } else {
-      await env.DB.prepare('UPDATE monitors SET last_check = ? WHERE id = ?')
-        .bind(new Date().toISOString(), monitor.id).run();
-    }
-  }
-
-  // 错误率告警(过去 5 分钟)
-  if (monitor.alert_error_rate > 0) {
-    await checkErrorRate(env, monitor, lang, tz);
-  }
-
-  return result;
-}
-
-async function sendUptimeAlert(env: Bindings, monitor: Monitor, type: 'DOWN' | 'UP', detail: string, lang: Lang, tz: string) {
-  const silenceH = monitor.alert_silence_uptime || 24;
-  const lastAlert = monitor.last_alert_uptime ? new Date(monitor.last_alert_uptime).getTime() : 0;
-  if (type === 'DOWN' && Date.now() - lastAlert < silenceH * 3_600_000) return;
-  const msg = buildAlertMessage({ name: monitor.name, url: monitor.url }, type, detail, formatTimeInTz(new Date(), tz), lang);
-  await sendAlertToAllChannels(env, msg);
-  await env.DB.prepare('UPDATE monitors SET last_alert_uptime = ? WHERE id = ?')
-    .bind(new Date().toISOString(), monitor.id).run();
-}
-
-async function checkErrorRate(env: Bindings, monitor: Monitor, lang: Lang, tz: string) {
-  const row = await env.DB.prepare(`
-    SELECT COUNT(*) as total, SUM(CASE WHEN is_fail=1 THEN 1 ELSE 0 END) as fails
-    FROM logs WHERE monitor_id = ? AND created_at >= datetime('now','-5 minutes')
-  `).bind(monitor.id).first<{ total: number; fails: number }>();
-  const total = row?.total || 0;
-  const fails = row?.fails || 0;
-  if (total >= 5 && fails / total >= monitor.alert_error_rate / 100) {
-    const lastAlert = monitor.last_alert_uptime ? new Date(monitor.last_alert_uptime).getTime() : 0;
-    if (Date.now() - lastAlert > 3600_000) { // 错误率告警 1 小时静默
-      const detail = `Error rate ${((fails / total) * 100).toFixed(1)}% in last 5 minutes (threshold ${monitor.alert_error_rate}%)`;
-      const msg = buildAlertMessage({ name: monitor.name, url: monitor.url }, 'DOWN', detail, formatTimeInTz(new Date(), tz), lang);
-      await sendAlertToAllChannels(env, msg);
-      await env.DB.prepare('UPDATE monitors SET last_alert_uptime = ? WHERE id = ?')
-        .bind(new Date().toISOString(), monitor.id).run();
-    }
-  }
-}
-
-async function sendAlertToAllChannels(env: Bindings, msg: ReturnType<typeof buildAlertMessage>): Promise<boolean> {
-  try {
-    const { results } = await env.DB.prepare('SELECT * FROM notification_channels WHERE enabled = 1').all<NotificationChannel>();
-    if (results && results.length > 0) {
-      const tasks = results.map(ch => sendToChannel(ch, msg, env));
-      const outcomes = await Promise.allSettled(tasks);
-      return outcomes.some(o => o.status === 'fulfilled' && o.value === true);
-    }
-  } catch (e) { console.error('Failed to read notification channels from DB:', e); }
-
-  if (env.DINGTALK_ACCESS_TOKEN && env.DINGTALK_SECRET) {
-    const fallbackChannel: NotificationChannel = {
-      id: 0, type: 'dingtalk', name: 'ENV DingTalk', enabled: 1,
-      config: JSON.stringify({ access_token: env.DINGTALK_ACCESS_TOKEN, secret: env.DINGTALK_SECRET }),
-      created_at: '',
-    };
-    return sendToChannel(fallbackChannel, msg, env);
-  }
-  console.warn('No notification channels configured.');
-  return false;
-}
-
-// 证书 / 域名到期告警(每 2 小时)
-async function checkExpiryAlerts(env: Bindings) {
-  const lang = isSupportedLang(await getSetting(env, 'language'));
-  const tz = await getSetting(env, 'timezone') || 'Asia/Shanghai';
-  const { results } = await env.DB.prepare(`
-    SELECT ${MONITOR_COLUMNS} FROM monitors WHERE paused = 0 AND type = 'http' AND (check_ssl = 1 OR check_domain = 1)
-  `).all<Monitor>();
-  for (const monitor of results || []) {
-    const now = Date.now();
-    const dayMs = 86_400_000;
-    // SSL
-    if (monitor.check_ssl && monitor.cert_expiry) {
-      const exp = new Date(monitor.cert_expiry).getTime();
-      const daysLeft = Math.floor((exp - now) / dayMs);
-      const lastAlert = monitor.last_alert_ssl ? new Date(monitor.last_alert_ssl).getTime() : 0;
-      if (daysLeft <= (monitor.alert_silence_ssl || 24) && now - lastAlert > dayMs) {
-        const msg = buildAlertMessage({ name: monitor.name, url: monitor.url }, 'DOWN',
-          `SSL certificate expires in ${daysLeft} days (${monitor.cert_expiry})`, formatTimeInTz(new Date(), tz), lang);
-        await sendAlertToAllChannels(env, msg);
-        await env.DB.prepare('UPDATE monitors SET last_alert_ssl = ? WHERE id = ?')
-          .bind(new Date().toISOString(), monitor.id).run();
-      }
-    }
-    // Domain
-    if (monitor.check_domain && monitor.domain_expiry) {
-      const exp = new Date(monitor.domain_expiry).getTime();
-      const daysLeft = Math.floor((exp - now) / dayMs);
-      const lastAlert = monitor.last_alert_domain ? new Date(monitor.last_alert_domain).getTime() : 0;
-      if (daysLeft <= (monitor.alert_silence_domain || 24) && now - lastAlert > dayMs) {
-        const msg = buildAlertMessage({ name: monitor.name, url: monitor.url }, 'DOWN',
-          `Domain expires in ${daysLeft} days (${monitor.domain_expiry})`, formatTimeInTz(new Date(), tz), lang);
-        await sendAlertToAllChannels(env, msg);
-        await env.DB.prepare('UPDATE monitors SET last_alert_domain = ? WHERE id = ?')
-          .bind(new Date().toISOString(), monitor.id).run();
-      }
-    }
-  }
-}
-
-// 日志清理 + 每日聚合
-async function cleanupAndAggregate(env: Bindings) {
-  // 清理 90 天前的日志
-  await env.DB.prepare("DELETE FROM logs WHERE created_at < datetime('now','-90 days')").run();
-  // 每日聚合
-  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS daily_uptime (
-    monitor_id INTEGER NOT NULL, date TEXT NOT NULL,
-    total_checks INTEGER DEFAULT 0, successful_checks INTEGER DEFAULT 0,
-    avg_latency INTEGER DEFAULT 0, PRIMARY KEY (monitor_id, date)
-  )`).run();
-  await env.DB.prepare(`
-    INSERT OR REPLACE INTO daily_uptime (monitor_id, date, total_checks, successful_checks, avg_latency)
-    SELECT monitor_id, date(created_at), COUNT(*), SUM(CASE WHEN is_fail=0 THEN 1 ELSE 0 END),
-           COALESCE(CAST(AVG(CASE WHEN is_fail=0 THEN latency END) AS INTEGER), 0)
-    FROM logs
-    WHERE created_at >= date('now','-1 day')
-    GROUP BY monitor_id, date(created_at)
-  `).run();
-  // 备份到 R2(如配置)
-  if (env.R2) {
-    try {
-      const tables = ['monitors', 'logs', 'incidents', 'settings', 'notification_channels', 'subscriptions'];
-      const dump: Record<string, unknown[]> = {};
-      for (const t of tables) {
-        const { results } = await env.DB.prepare(`SELECT * FROM ${t}`).all();
-        dump[t] = results || [];
-      }
-      const key = `backups/${new Date().toISOString().slice(0, 10)}.json`;
-      await env.R2.put(key, JSON.stringify(dump));
-    } catch (e) { console.error('R2 backup failed:', e); }
-  }
-}
-
-async function runScheduledTasks(env: Bindings) {
-  await ensureInitialized(env);
-  const tasks: Promise<void>[] = [checkSites(env)];
-  const hour = new Date().getUTCHours();
-  if (hour === 2) {
-    tasks.push(cleanupAndAggregate(env));
-    tasks.push(checkExpiryAlerts(env));
-  }
-  await Promise.all(tasks);
-}
-
-// ============================================================
-// 订阅者通知
-// ============================================================
-async function notifySubscribers(env: Bindings, title: string, description: string, _source: string) {
-  try {
-    const { results } = await env.DB.prepare('SELECT email FROM subscriptions').all<Subscription>();
-    if (!results || results.length === 0) return;
-    const emailCfg = await getEmailConfigForLogin(env);
-    if (!emailCfg) return;
-    const html = `<p><strong>${escapeXml(title)}</strong></p><p>${escapeXml(description)}</p>`;
-    for (const sub of results) {
-      await sendLoginEmail(env, emailCfg, sub.email, `[${(await getSetting(env, 'site_title')) || 'MonitorFlare'}] ${title}`, html).catch(console.error);
-    }
-  } catch (e) { console.error('notifySubscribers failed:', e); }
-}
-
-// ============================================================
-// 邮件工具(登录链接 / 订阅通知共用)
-// ============================================================
-async function getEmailConfigForLogin(env: Bindings): Promise<{ channel: NotificationChannel } | null> {
-  const { results } = await env.DB.prepare("SELECT * FROM notification_channels WHERE type = 'email' AND enabled = 1 ORDER BY created_at DESC LIMIT 1").all<NotificationChannel>();
-  if (!results || results.length === 0) return null;
-  return { channel: results[0] };
-}
-
-async function sendLoginEmail(env: Bindings, cfg: { channel: NotificationChannel }, to: string, subject: string, html: string): Promise<boolean> {
-  const msg = buildAlertMessage({ name: '', url: '' }, 'UP', '', new Date().toISOString(), 'en');
-  const channel = cfg.channel;
-  const config = (() => { try { return JSON.parse(channel.config) as Record<string, string>; } catch { return {}; } })();
-  // 构造一个自定义消息来复用 sendToChannel
-  const customMsg = { ...msg, title: subject, detail: html, statusText: '', monitorName: '', monitorUrl: '' };
-  const cfgWithTo = { ...config, to_email: to };
-  const fakeChannel: NotificationChannel = { ...channel, config: JSON.stringify(cfgWithTo) };
-  return sendToChannel(fakeChannel, customMsg, env);
-}
-
-// ============================================================
-// 工具
-// ============================================================
-function escapeXml(s: string): string {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
-}
-
-async function safeCompare(a: string, b: string): Promise<boolean> {
-  const encoder = new TextEncoder();
-  const digestA = await crypto.subtle.digest('SHA-256', encoder.encode(a));
-  const digestB = await crypto.subtle.digest('SHA-256', encoder.encode(b));
-  const bufA = new Uint8Array(digestA), bufB = new Uint8Array(digestB);
-  let diff = bufA.length ^ bufB.length;
-  for (let i = 0; i < Math.max(bufA.length, bufB.length); i++) diff |= (bufA[i] || 0) ^ (bufB[i] || 0);
-  return diff === 0;
-}
-
-// ============================================================
 // 导出
 // ============================================================
 export default {
   fetch: app.fetch,
+  // 定时任务：探测 / 状态机 / 告警编排 / 每日聚合均在 ./scheduler.ts
   async scheduled(_event: ScheduledEvent, env: Bindings, ctx: ExecutionContext) {
     ctx.waitUntil(runScheduledTasks(env));
   },

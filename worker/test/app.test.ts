@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
 import { env as poolEnv, createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
 import worker from '../src/index';
 import type { Bindings } from '../src/types';
@@ -101,7 +101,12 @@ describe('受保护接口鉴权', () => {
 
     const ok = await call('/health', bearer('test-admin-key'));
     expect(ok.status).toBe(200);
-    expect(await ok.json()).toEqual({ status: 'ok', db: true, ok: true });
+    const body = await ok.json() as Record<string, unknown>;
+    expect(body).toMatchObject({ status: 'ok', db: true, ok: true });
+    // 系统状态栏用到的字段都必须存在(取值正确性见 '/health 系统状态指标')
+    for (const key of ['logs', 'enabled_channels', 'latest_daily_uptime', 'latest_log_at']) {
+      expect(body).toHaveProperty(key);
+    }
   });
 
   it('/notification-channels 受保护', async () => {
@@ -249,5 +254,96 @@ describe('批量操作', () => {
 
     await call('/monitors/batch', batch({ action: 'delete', ids: [id] }));
     expect(await env.DB.prepare('SELECT id FROM monitors WHERE id = ?').bind(id).first()).toBeNull();
+  });
+});
+
+describe('创建监控时立即执行首次探测', () => {
+  const create = (payload: unknown): RequestInit => ({
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer test-admin-key' },
+    body: JSON.stringify(payload),
+  });
+
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('创建成功后写入探测日志并刷新 last_check', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('ok', { status: 200 })));
+    const res = await call('/monitors', create({ name: 'first-check', url: 'https://example.com' }));
+    expect(res.status).toBe(201);
+    const { id } = (await res.json()) as { id: number };
+
+    const log = await env.DB.prepare('SELECT status_code, is_fail FROM logs WHERE monitor_id = ?')
+      .bind(id)
+      .first<{ status_code: number; is_fail: number }>();
+    expect(log).not.toBeNull();
+    expect(log?.is_fail).toBe(0);
+    expect(log?.status_code).toBe(200);
+
+    const row = await env.DB.prepare('SELECT last_check FROM monitors WHERE id = ?')
+      .bind(id)
+      .first<{ last_check: string | null }>();
+    expect(row?.last_check).not.toBeNull();
+  });
+
+  it('首次探测失败时同样落库且不抛出', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('boom', { status: 500 })));
+    const res = await call('/monitors', create({ name: 'first-check-fail', url: 'https://example.com' }));
+    expect(res.status).toBe(201);
+    const { id } = (await res.json()) as { id: number };
+
+    const log = await env.DB.prepare('SELECT is_fail FROM logs WHERE monitor_id = ?')
+      .bind(id)
+      .first<{ is_fail: number }>();
+    expect(log?.is_fail).toBe(1);
+  });
+
+  it('缺少 url 返回 400 且不创建监控', async () => {
+    const res = await call('/monitors', create({ name: 'no-url' }));
+    expect(res.status).toBe(400);
+  });
+});
+
+describe('/health 系统状态指标', () => {
+  // 用不会与真实数据冲突的假 monitor_id 与远期日期,断言不依赖其他用例留下的数据
+  const TMP_MONITOR = 999999;
+
+  afterEach(async () => {
+    await env.DB.prepare('DELETE FROM logs WHERE monitor_id = ?').bind(TMP_MONITOR).run();
+    await env.DB.prepare('DELETE FROM daily_uptime WHERE monitor_id = ?').bind(TMP_MONITOR).run();
+    await env.DB.prepare("DELETE FROM notification_channels WHERE name LIKE '健康检查测试%'").run();
+  });
+
+  it('返回日志量 / 启用渠道数 / 最近聚合日 / 最近检测时间', async () => {
+    // 取基线再比较增量,避免破坏其他用例写入的数据
+    const chBase = await env.DB.prepare('SELECT COUNT(*) as c FROM notification_channels WHERE enabled = 1').first<{ c: number }>();
+    const logBase = await env.DB.prepare('SELECT COUNT(*) as c FROM logs').first<{ c: number }>();
+
+    await env.DB.batch([
+      env.DB.prepare("INSERT INTO notification_channels (type, name, enabled, config) VALUES ('webhook', '健康检查测试-启用', 1, '{}')"),
+      env.DB.prepare("INSERT INTO notification_channels (type, name, enabled, config) VALUES ('webhook', '健康检查测试-停用', 0, '{}')"),
+      env.DB.prepare('INSERT INTO logs (monitor_id, status_code, latency, is_fail, created_at) VALUES (?, 200, 12, 0, ?)')
+        .bind(TMP_MONITOR, '2099-01-01 03:00:00'),
+      env.DB.prepare('INSERT INTO logs (monitor_id, status_code, latency, is_fail, created_at) VALUES (?, 500, 30, 1, ?)')
+        .bind(TMP_MONITOR, '2099-01-01 04:00:00'),
+      env.DB.prepare('INSERT OR REPLACE INTO daily_uptime (monitor_id, date, total_checks, successful_checks, avg_latency) VALUES (?, ?, 10, 10, 20)')
+        .bind(TMP_MONITOR, '2099-01-01'),
+    ]);
+
+    const res = await call('/health', bearer('test-admin-key'));
+    expect(res.status).toBe(200);
+
+    const body = await res.json() as {
+      status: string; ok: boolean; db: boolean;
+      logs: number; enabled_channels: number;
+      latest_daily_uptime: string | null; latest_log_at: string | null;
+    };
+    expect(body.status).toBe('ok');
+    expect(body.ok).toBe(true);
+    expect(body.db).toBe(true);
+    expect(body.logs).toBe((logBase?.c ?? 0) + 2);
+    // 只统计 enabled = 1 的渠道
+    expect(body.enabled_channels).toBe((chBase?.c ?? 0) + 1);
+    expect(body.latest_daily_uptime).toBe('2099-01-01');
+    expect(body.latest_log_at).toBe('2099-01-01 04:00:00');
   });
 });

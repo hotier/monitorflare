@@ -1,6 +1,6 @@
 /**
  * MonitorFlare — 日期与格式工具
- * 时区:统一使用 dayjs.tz(全局时区,可在设置中修改,默认 UTC)
+ * 时区:统一使用 dayjs.tz(全局时区,可在设置中修改,默认 Asia/Shanghai)
  * 相对时间:dayjs relativeTime(按当前语言自动本地化)
  */
 import dayjs from 'dayjs';
@@ -22,7 +22,8 @@ const normalizeDate = (str) => {
     return str;
 };
 
-const getTz = () => localStorage.getItem('monitorflare_tz') || 'Asia/Shanghai';
+/** 应用时区(在设置里可改,默认 Asia/Shanghai);与后端 settings.timezone 保持同源 */
+export const getTz = () => localStorage.getItem('monitorflare_tz') || 'Asia/Shanghai';
 
 /** 相对时间(按当前语言本地化) */
 export const formatDate = (str) => {
@@ -56,6 +57,23 @@ export const formatDateTime = (str) => {
     if (!date.isValid()) return '-';
     return date.tz(getTz()).format('YYYY-MM-DD HH:mm:ss');
 };
+
+/** 应用时区下的今天 YYYY-MM-DD */
+export const todayLocalDateStr = () => dayjs().tz(getTz()).format('YYYY-MM-DD');
+
+/** 某时刻在应用时区下的日期 YYYY-MM-DD;空值/非法值返回空串 */
+export const localDateStr = (str) => {
+    if (str === undefined || str === null || str === '') return '';
+    const raw = String(str).trim();
+    if (!raw) return '';
+    // 纯日期不含时间信息,直接视为本地的那一天,不做时区换算
+    if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
+    const date = dayjs(normalizeDate(raw));
+    return date.isValid() ? date.tz(getTz()).format('YYYY-MM-DD') : '';
+};
+
+/** 在 YYYY-MM-DD 上做整天偏移(纯日历运算,不受时区与夏令时影响) */
+export const shiftDateStr = (dateStr, days) => dayjs(dateStr).add(days, 'day').format('YYYY-MM-DD');
 
 /** 证书/域名剩余天数 */
 export const getDaysRemaining = (dateStr) => {

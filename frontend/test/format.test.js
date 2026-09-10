@@ -9,6 +9,9 @@ import {
   formatExpiry,
   latencyClass,
   statusBadgeClass,
+  todayLocalDateStr,
+  localDateStr,
+  shiftDateStr,
 } from '../src/utils/format.js';
 
 const NOW = new Date('2024-03-05T12:00:00Z');
@@ -192,5 +195,53 @@ describe('statusBadgeClass', () => {
     expect(statusBadgeClass('UP', false)).toContain('emerald');
     expect(statusBadgeClass('DOWN', false)).toContain('red');
     expect(statusBadgeClass('PENDING', false)).toContain('yellow');
+  });
+});
+
+describe('todayLocalDateStr', () => {
+  it('按默认时区(上海)给出今天', () => {
+    expect(todayLocalDateStr()).toBe('2024-03-05'); // NOW = 12:00Z → 上海 20:00
+  });
+
+  it('跨时区回退日:UTC 深夜在上海已是第二天', () => {
+    vi.setSystemTime(new Date('2024-03-05T20:00:00Z')); // 上海 03-06 04:00
+    expect(todayLocalDateStr()).toBe('2024-03-06');
+    localStorage.setItem('monitorflare_tz', 'UTC');
+    expect(todayLocalDateStr()).toBe('2024-03-05');
+  });
+});
+
+describe('localDateStr', () => {
+  it('时间戳按应用时区归日', () => {
+    // UTC 09-10 17:30 → 上海 09-11 01:30
+    expect(localDateStr('2026-09-10 17:30:00')).toBe('2026-09-11');
+  });
+
+  it('切换时区后归日结果随之改变', () => {
+    localStorage.setItem('monitorflare_tz', 'UTC');
+    expect(localDateStr('2026-09-10 17:30:00')).toBe('2026-09-10');
+  });
+
+  it('纯日期原样返回,不参与时区换算', () => {
+    expect(localDateStr('2024-03-03')).toBe('2024-03-03');
+  });
+
+  it('空值与非法值返回空串', () => {
+    expect(localDateStr(null)).toBe('');
+    expect(localDateStr(undefined)).toBe('');
+    expect(localDateStr('')).toBe('');
+    expect(localDateStr('garbage')).toBe('');
+  });
+});
+
+describe('shiftDateStr', () => {
+  it('按天偏移(含跨月跨年)', () => {
+    expect(shiftDateStr('2024-03-05', -89)).toBe('2023-12-07');
+    expect(shiftDateStr('2024-03-05', 0)).toBe('2024-03-05');
+  });
+
+  it('正确跨过闰日', () => {
+    expect(shiftDateStr('2024-02-28', 1)).toBe('2024-02-29');
+    expect(shiftDateStr('2023-02-28', 1)).toBe('2023-03-01');
   });
 });
