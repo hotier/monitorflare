@@ -3,6 +3,8 @@ on:
   push:
     paths:
       - .github/workflows/diag-worker.yml
+  workflow_dispatch:
+
 jobs:
   diag:
     runs-on: ubuntu-latest
@@ -14,13 +16,27 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: deployments / versions / traffic split
+        run: |
+          set -u
+          API="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/monitorflare-worker"
+          echo "== deployments =="
+          curl -sS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$API/deployments" \
+            | jq '{success, errors, result}'
+          echo "== versions =="
+          curl -sS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$API/versions" \
+            | jq '{success, result: [.result[]? | {id: .id, number: .number, created_on: .created_on, source: .source}]}'
+          echo "== settings (compatibility date / bindings) =="
+          curl -sS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$API/settings" \
+            | jq '{success, result: {compatibility_date: .result.compatibility_date, compatibility_flags: .result.compatibility_flags, bindings: [.result.bindings[]? | {type, name, namespace_id: .namespace_id, text: .text}]}}'
       - name: tail worker and probe
         run: |
+          set -u
           (npx --yes wrangler@4 tail monitorflare-worker --format=json > /tmp/tail.log 2>&1 &)
           sleep 75
           echo "== tail connected? size =="
           wc -c /tmp/tail.log
-          for p in /settings /api/status /health; do
+          for p in / /settings /monitors/public; do
             echo "== request $p =="
             curl -sS -o /tmp/r -w "status=%{http_code}\n" "https://monitorflare-worker.lht1976277790-002.workers.dev$p" || true
             head -c 120 /tmp/r; echo
