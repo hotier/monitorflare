@@ -1,0 +1,21 @@
+{
+  "name": "monitorflare",
+  "version": "1.0.0",
+  "private": true,
+  "description": "MonitorFlare 仓库级开发工具链（lint / format）。运行时代码在 frontend/ 与 worker/ 各自的 package.json 中。",
+  "scripts": {
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "eslint": "^9.39.4",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-vue": "^10.11.0",
+    "globals": "^17.12.0",
+    "prettier": "^3.9.6",
+    "typescript-eslint": "^8.70.0"
+  }
+}

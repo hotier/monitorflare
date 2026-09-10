@@ -6,7 +6,7 @@ import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { cors } from 'hono/cors';
 import type { Bindings, CheckResult, Incident, Monitor, NotificationChannel, Subscription } from './types';
-import { performCheck, updateDomainCertInfo } from './checks';
+import { performCheck, updateDomainCertInfo, normalizeMonitorUrl } from './checks';
 import { sendToChannel, CHANNEL_TYPES, EMAIL_PROVIDERS } from './channels';
 import { buildAlertMessage, isSupportedLang, type Lang } from './i18n';
 import { ensureInitialized, getSetting, getSettingsMap } from './init';
@@ -18,7 +18,7 @@ import {
 } from './auth';
 import {
   getAllowedOrigins, isLocalOrigin, getAuthSecret, isValidEmail,
-  maskChannelConfig, formatTimeInTz, randomToken, base64UrlEncode, hmacSha256, safeEqual, maskSecret,
+  maskChannelConfig, formatTimeInTz, randomToken, safeEqual, maskSecret,
 } from './utils';
 
 const MONITOR_COLUMNS = `
@@ -443,8 +443,9 @@ app.get('/monitors/public/:id', async (c) => {
 app.post('/monitors', async (c) => {
   try {
     const body = await c.req.json<Partial<Monitor>>();
-    const { name, url, interval, keyword, user_agent, tags, request_headers, request_body } = body;
-    if (!name || !url) return c.json({ error: 'Missing name or url' }, 400);
+    const { name, interval, keyword, user_agent, tags, request_headers, request_body } = body;
+    if (!name || !body.url) return c.json({ error: 'Missing name or url' }, 400);
+    const url = normalizeMonitorUrl(body.url);
     const type = (['dns', 'port'].includes(body.type || '') ? body.type : 'http') as Monitor['type'];
     const method = (body.method || 'GET').toUpperCase();
     const config = body.config || null;
@@ -528,7 +529,7 @@ app.post('/monitors/:id/check', async (c) => {
     const monitor = await c.env.DB.prepare(`SELECT ${MONITOR_COLUMNS} FROM monitors WHERE id = ?`)
       .bind(id).first<Monitor>();
     if (!monitor) return c.json({ error: 'Monitor not found' }, 404);
-    const result = await performCheck(monitor, c.env);
+    const result = await performMonitorCheck(monitor, c.env);
     return c.json(result);
   } catch (e: unknown) {
     return c.json({ error: e instanceof Error ? e.message : 'Unknown error' }, 500);
@@ -538,10 +539,18 @@ app.post('/monitors/:id/check', async (c) => {
 app.patch('/monitors/:id/pause', async (c) => {
   const id = c.req.param('id');
   try {
-    const body = await c.req.json<{ paused?: number }>();
-    await c.env.DB.prepare('UPDATE monitors SET paused = ?, status = ? WHERE id = ?')
-      .bind(body.paused ? 1 : 0, body.paused ? 'PAUSED' : 'UP', id).run();
-    return c.json({ success: true });
+    // 优先使用 body.paused,未提供时按当前状态取反(toggle)
+    let paused: number | undefined;
+    try {
+      const body = await c.req.json<{ paused?: number }>();
+      paused = body?.paused;
+    } catch { /* no body */ }
+    const row = await c.env.DB.prepare('SELECT paused FROM monitors WHERE id = ?').bind(id).first<{ paused: number }>();
+    if (!row) return c.json({ error: 'Monitor not found' }, 404);
+    const next = paused !== undefined ? (paused ? 1 : 0) : (row.paused ? 0 : 1);
+    await c.env.DB.prepare('UPDATE monitors SET paused = ?, status = ?, retry_count = 0 WHERE id = ?')
+      .bind(next, next ? 'PAUSED' : 'UP', id).run();
+    return c.json({ success: true, paused: !!next });
   } catch (e: unknown) {
     return c.json({ error: e instanceof Error ? e.message : 'Unknown error' }, 500);
   }
@@ -1260,9 +1269,9 @@ async function performMonitorCheck(monitor: Monitor, env: Bindings) {
   if (monitor.type === 'http') {
     const lastInfoCheck = monitor.check_info_status ? new Date(monitor.check_info_status).getTime() : 0;
     if (Date.now() - lastInfoCheck > 86400000) {
-      env.DB.prepare('UPDATE monitors SET check_info_status = ? WHERE id = ?')
-        .bind(new Date().toISOString(), monitor.id).run()
-        .then(() => updateDomainCertInfo(env, monitor)).catch(console.error);
+      await env.DB.prepare('UPDATE monitors SET check_info_status = ? WHERE id = ?')
+        .bind(new Date().toISOString(), monitor.id).run();
+      await updateDomainCertInfo(env, monitor);
     }
   }
 
@@ -1296,6 +1305,8 @@ async function performMonitorCheck(monitor: Monitor, env: Bindings) {
   if (monitor.alert_error_rate > 0) {
     await checkErrorRate(env, monitor, lang, tz);
   }
+
+  return result;
 }
 
 async function sendUptimeAlert(env: Bindings, monitor: Monitor, type: 'DOWN' | 'UP', detail: string, lang: Lang, tz: string) {

@@ -8,7 +8,7 @@
             <i class="fas fa-search absolute left-2.5 top-1/2 -translate-y-1/2 text-[10px] text-slate-500"></i>
             <input :value="searchQuery" @input="$emit('update:searchQuery', $event.target.value)" type="text" :placeholder="$t('adminPage.searchPlaceholder')" class="search-input">
           </div>
-          <select :value="sortKey" @change="$emit('update:sortKey', $event.target.value)" class="text-[11px] font-mono bg-transparent border border-slate-300 dark:border-slate-700 text-slate-600 dark:text-slate-400 rounded-lg px-2 py-1.5 cursor-pointer focus:outline-none focus:border-green-500" style="appearance:none;-webkit-appearance:none">
+          <select :value="sortKey" @change="$emit('update:sortKey', $event.target.value)" class="text-[11px] h-8 bg-transparent border border-slate-300 dark:border-slate-700 text-slate-600 dark:text-slate-400 rounded-lg px-2 cursor-pointer focus:outline-none focus:border-green-500" style="appearance:none;-webkit-appearance:none">
             <option value="">{{ $t('adminPage.sortDefault') }}</option><option value="name">{{ $t('adminPage.sortByName') }}</option><option value="status">{{ $t('adminPage.sortByStatus') }}</option><option value="latency">{{ $t('adminPage.sortByLatency') }}</option><option value="ssl">{{ $t('adminPage.sortBySsl') }}</option>
           </select>
           <span class="text-xs font-mono text-slate-500 dark:text-slate-600 shrink-0">{{ filteredMonitors.length }} / {{ monitors.length }}</span>

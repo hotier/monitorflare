@@ -32,7 +32,7 @@ import { ref, computed } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { statusLogin } from '../../utils/api';
 
-const props = defineProps({
+defineProps({
     title: { type: String, default: 'MonitorFlare' },
 });
 const emit = defineEmits(['unlocked']);

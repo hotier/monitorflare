@@ -14,7 +14,7 @@ function conditionalScripts(env) {
       html = html.replace(
         '<!-- __CF_ANALYTICS_SCRIPT__ -->',
         cfToken
-          ? `<script defer src='https://static.cloudflareinsights.com/beacon.min.js' data-cf-beacon='{"token": "${cfToken}"}'><\/script>`
+          ? `<script defer src='https://static.cloudflareinsights.com/beacon.min.js' data-cf-beacon='{"token": "${cfToken}"}'></script>`
           : ''
       );
 

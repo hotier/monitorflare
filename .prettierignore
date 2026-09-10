@@ -1,0 +1,13 @@
+node_modules/
+**/node_modules/
+
+# 构建产物
+**/dist/
+**/.wrangler/
+frontend/public/
+
+# 自动生成的类型声明
+**/worker-configuration.d.ts
+
+# 多语言 README（由翻译流程维护，格式不统一）
+README.*.md

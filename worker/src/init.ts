@@ -115,6 +115,9 @@ export async function ensureInitialized(env: Bindings): Promise<boolean> {
         await ensureColumn(env, 'monitors', 'type', "TEXT DEFAULT 'http'");
         await ensureColumn(env, 'monitors', 'config', 'TEXT');
         await ensureColumn(env, 'monitors', 'alert_after_failures', 'INTEGER DEFAULT 1');
+        await ensureColumn(env, 'monitors', 'cert_expiry', 'TEXT');
+        await ensureColumn(env, 'monitors', 'domain_expiry', 'TEXT');
+        await ensureColumn(env, 'monitors', 'check_info_status', 'TEXT');
         return true;
       } catch (e) {
         console.error('Init failed:', e);

@@ -23,7 +23,7 @@
               <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/>
             </svg>
           </div>
-          <span class="hidden sm:inline font-mono text-slate-500 dark:text-slate-400">{{ loading ? $t('statusHeader.syncing') : $t('statusHeader.live') }}</span>
+          <span class="hidden sm:inline text-slate-500 dark:text-slate-400">{{ loading ? $t('statusHeader.syncing') : $t('statusHeader.live') }}</span>
         </div>
         <!-- 语言切换 -->
         <div class="relative">

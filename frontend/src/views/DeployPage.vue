@@ -48,7 +48,7 @@
             {{ $t('deployPage.ctaGithub') }}
           </a>
         </div>
-        <p class="text-xs text-slate-400 dark:text-slate-600 mt-4 font-mono">{{ $t('deployPage.freeHint') }}</p>
+        <p class="text-xs text-slate-400 dark:text-slate-600 mt-4">{{ $t('deployPage.freeHint') }}</p>
       </div>
 
       <!-- 三步说明 -->
@@ -70,16 +70,9 @@
     </main>
 
     <!-- Footer -->
-    <footer class="border-t border-black/[0.06] dark:border-white/[0.04] py-6">
-      <div class="max-w-5xl mx-auto px-6 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-slate-500 dark:text-slate-600">
+    <footer class="border-t border-black/[0.06] dark:border-white/[0.04] py-3">
+      <div class="max-w-5xl mx-auto px-6 flex justify-center text-xs text-slate-500 dark:text-slate-600">
         <p>&copy; {{ new Date().getFullYear() }} MonitorFlare. {{ $t('deployPage.openSource') }}</p>
-        <a href="https://monitorflare.csr.plus/" target="_blank" rel="noopener"
-          class="flex items-center gap-1.5 text-slate-400 dark:text-slate-600 hover:text-emerald-500 transition-colors">
-          <svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
-            <path d="M3 12h4l2-7 3 14 2-7h7"/>
-          </svg>
-          {{ $t('footer.poweredByText', { name: 'MonitorFlare' }) }}
-        </a>
       </div>
     </footer>
   </div>

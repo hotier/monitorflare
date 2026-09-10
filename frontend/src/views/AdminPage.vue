@@ -96,32 +96,14 @@
     </main>
 
     <!-- Footer -->
-    <footer v-if="isAuthenticated" class="mt-auto py-5 border-t border-white/5">
-      <div class="max-w-5xl mx-auto px-4 flex flex-col md:flex-row justify-between items-center gap-3">
-        <p class="text-xs text-slate-600">
+    <footer v-if="isAuthenticated" class="mt-auto py-2.5 border-t border-white/5">
+      <div class="max-w-5xl mx-auto px-4 grid grid-cols-1 md:grid-cols-3 items-center gap-3">
+        <div class="hidden md:block"></div>
+        <p class="text-xs text-slate-600 text-center">
           &copy; {{ new Date().getFullYear() }} <a :href="footerUrl" target="_blank" class="hover:text-green-400 transition-colors font-medium">{{ footerAuthor }}</a>. {{ $t('footer.allRightsReserved') }}
         </p>
-        <div class="flex items-center gap-4 text-xs text-slate-700 font-mono">
+        <div class="flex items-center justify-center md:justify-self-end gap-4 text-xs text-slate-700 font-mono">
           <span><i class="fas fa-code-branch mr-1"></i>v1.4.0</span>
-          <span><i class="fas fa-server mr-1"></i>{{ $t('footer.cloudflareEdge') }}</span>
-          <a href="https://monitorflare.csr.plus/" target="_blank" rel="noopener"
-            class="flex items-center gap-1.5 text-slate-500 hover:text-green-400 transition-colors not-italic">
-            <svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
-              <path d="M3 12h4l2-7 3 14 2-7h7"/>
-            </svg>
-            {{ $t('footer.poweredByText', { name: 'MonitorFlare' }) }}
-          </a>
-          <a href="https://github.com/nianshu2022/Uptime-Monitor" target="_blank" rel="noopener"
-            class="flex items-center gap-1.5 text-slate-500 hover:text-green-400 transition-colors not-italic">
-            <svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
-              <path d="M12.75 3.03v.568c0 .334.148.65.405.864l1.068.89c.442.369.535 1.01.216 1.49l-.51.766a1.05 1.05 0 01-1.35.276l-.693-.318a1.05 1.05 0 00-1.049.002l-.64.294a1.05 1.05 0 01-1.327-.315l-.507-.73a1.045 1.045 0 01.195-1.449l.72-.6a1.05 1.05 0 00.375-.83V3.03m0 0h.75m-7.5 2.25h2.25m-3 3h2.25M12 3.75v.75M8.25 9.75h6.75M19.5 3.75v5.25a.75.75 0 01-.75.75H15m6 5.25H5.25M21 3.75v14.25a2.25 2.25 0 01-2.25 2.25H5.25A2.25 2.25 0 013 18V3.75m18 0v0A2.25 2.25 0 0018.75 1.5H5.25A2.25 2.25 0 003 3.75m18 0v0"/>
-            </svg>
-            {{ $t('footer.credit') }}
-          </a>
-          <a href="https://github.com/xusteve/MonitorFlare" target="_blank" rel="noopener" :title="$t('footer.github')" :aria-label="$t('footer.github')"
-            class="flex items-center text-slate-500 hover:text-green-400 transition-colors not-italic">
-            <i class="fa-brands fa-github text-sm"></i>
-          </a>
         </div>
       </div>
     </footer>
@@ -152,13 +134,13 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch, nextTick } from 'vue';
+import { ref, computed, onMounted } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useAuth } from '../composables/useAuth';
 import { useTheme } from '../composables/useTheme';
 import { useToast } from '../composables/useToast';
 import { API_BASE, fetchT, withRetry } from '../utils/api';
-import { formatDateFull, getDaysRemaining, getExpiryClassAdmin } from '../utils/format';
+import { formatDateFull } from '../utils/format';
 
 // 子组件
 import LoginDialog from '../components/admin/LoginDialog.vue';
@@ -344,7 +326,7 @@ const forceCheck = async (m) => {
 
 // ── 暂停/恢复 ──
 const togglePause = async (m) => {
-    try { const res = await authFetch(`${API_BASE}/monitors/${m.id}/pause`, { method: 'PATCH' }); if (res.ok) { const d = await res.json(); addToast(d.paused ? t('adminPage.paused', { name: m.name }) : t('adminPage.resumed', { name: m.name }), 'info'); fetchMonitors(); } } catch { addToast(t('common.networkError'), 'error'); }
+    try { const res = await authFetch(`${API_BASE}/monitors/${m.id}/pause`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ paused: m.paused ? 0 : 1 }) }); if (res.ok) { const d = await res.json(); addToast(d.paused ? t('adminPage.paused', { name: m.name }) : t('adminPage.resumed', { name: m.name }), 'info'); fetchMonitors(); } else { addToast(t('common.actionFailed'), 'error'); } } catch { addToast(t('common.networkError'), 'error'); }
 };
 
 // ── 克隆 ──

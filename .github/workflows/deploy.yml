@@ -10,9 +10,58 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+  # ── 门禁：任何部署前必须先通过 lint / 类型检查 / 测试 ──
+  verify:
+    name: Verify (lint / typecheck / test)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: |
+            package-lock.json
+            worker/package-lock.json
+            frontend/package-lock.json
+
+      # 仓库级 ESLint 9 flat config
+      - name: Install root tooling
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      # Worker：类型检查 + 在 workerd/D1 中跑单元与集成测试
+      - name: Install worker dependencies
+        working-directory: worker
+        run: npm ci
+
+      - name: Typecheck worker
+        working-directory: worker
+        run: npm run typecheck
+
+      - name: Test worker
+        working-directory: worker
+        run: npm test
+
+      # Frontend：在 jsdom 中跑工具函数与组件测试
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Test frontend
+        working-directory: frontend
+        run: npm test
+
   deploy-worker:
     name: Deploy Worker (Backend)
     runs-on: ubuntu-latest
+    needs: verify
 
     steps:
       - name: Checkout code
@@ -74,6 +123,7 @@ jobs:
   deploy-pages:
     name: Deploy Pages (Frontend)
     runs-on: ubuntu-latest
+    needs: verify
 
     steps:
       - name: Checkout code

@@ -4,6 +4,13 @@
 // ============================================================
 import type { Bindings, CheckResult, Monitor } from './types';
 
+// ---------- URL 规范化(无协议时自动补 https://) ----------
+export function normalizeMonitorUrl(raw: string): string {
+  const url = (raw || '').trim();
+  if (!url || /^https?:\/\//i.test(url)) return url;
+  return `https://${url}`;
+}
+
 // ---------- HTTP 监测 ----------
 async function checkHTTP(monitor: Monitor): Promise<CheckResult> {
   const startTime = Date.now();
@@ -27,7 +34,7 @@ async function checkHTTP(monitor: Monitor): Promise<CheckResult> {
         (fetchOptions.headers as Record<string, string>)['Content-Type'] = 'application/json';
       }
     }
-    const response = await fetch(monitor.url, fetchOptions);
+    const response = await fetch(normalizeMonitorUrl(monitor.url), fetchOptions);
     const latency = Date.now() - startTime;
     if (!response.ok) {
       return { ok: false, statusCode: response.status, latency, reason: `HTTP ${response.status}` };
@@ -197,58 +204,112 @@ export async function performCheck(monitor: Monitor, _env: Bindings): Promise<Ch
   }
 }
 
-// ---------- 域名 / 证书信息更新(crt.sh + rdap.org) ----------
+// ---------- 域名 / 证书信息更新(多数据源 + 超时保护) ----------
+const INFO_FETCH_TIMEOUT_MS = 10000;
+
+/** 带超时的 JSON GET,失败返回 null */
+async function fetchJson<T>(url: string, headers?: Record<string, string>): Promise<T | null> {
+  try {
+    const res = await fetch(url, { headers, signal: AbortSignal.timeout(INFO_FETCH_TIMEOUT_MS) });
+    if (!res.ok) return null;
+    return await res.json() as T;
+  } catch { return null; }
+}
+
+/** 证书到期:Cert Spotter 优先,失败回退 crt.sh;只取仍有效且到期最晚的一张 */
+async function fetchLatestCertExpiry(domain: string): Promise<string | null> {
+  const nowMs = Date.now();
+  const pickLatest = (items: { not_after?: string | null }[]): string | null => {
+    const exps = items
+      .map(c => c.not_after)
+      .filter((s): s is string => !!s)
+      .map(s => new Date(s.includes('T') ? s : s.replace(' ', 'T')).getTime())
+      .filter(t => !isNaN(t) && t > nowMs)
+      .sort((a, b) => b - a);
+    return exps.length > 0 ? new Date(exps[0]).toISOString() : null;
+  };
+
+  // 1) Cert Spotter(商用级 CT 查询,免费匿名限流)
+  const spotter = await fetchJson<{ not_after?: string }[]>(
+    `https://api.certspotter.com/v1/certs-by-domain?domain=${encodeURIComponent(domain)}&include_expired=false&include_subdomains=true`
+  );
+  if (Array.isArray(spotter) && spotter.length > 0) {
+    const expiry = pickLatest(spotter);
+    if (expiry) return expiry;
+  }
+
+  // 2) 回退 crt.sh(含根域与通配符证书扩展搜索)
+  const browserUA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+  const fetchCerts = async (searchDomain: string): Promise<{ not_after?: string }[]> => {
+    const data = await fetchJson<{ not_after?: string }[]>(`https://crt.sh/?q=${encodeURIComponent(searchDomain)}&output=json`, { 'User-Agent': browserUA });
+    return Array.isArray(data) ? data : [];
+  };
+
+  let certs = await fetchCerts(domain);
+  if (domain.split('.').length > 2) {
+    const parts = domain.split('.');
+    const rootDomain = parts.slice(parts.length - 2).join('.');
+    const [rootCerts, wildcardCerts] = await Promise.all([
+      fetchCerts(rootDomain),
+      fetchCerts(`%.${rootDomain}`),
+    ]);
+    certs = [...certs, ...rootCerts, ...wildcardCerts];
+  }
+  return certs.length > 0 ? pickLatest(certs) : null;
+}
+
+/** IANA RDAP bootstrap:TLD → 官方注册局端点映射(进程内缓存) */
+let rdapBootstrapCache: Record<string, string[]> | null = null;
+async function getBootstrapRdapUrls(domain: string): Promise<string[]> {
+  try {
+    const tld = domain.split('.').pop()?.toLowerCase();
+    if (!tld) return [];
+    if (!rdapBootstrapCache) {
+      const res = await fetch('https://data.iana.org/rdap/dns.json', { signal: AbortSignal.timeout(5000) });
+      if (!res.ok) return [];
+      const json = await res.json<{ services?: [string[], string[]][] }>();
+      const map: Record<string, string[]> = {};
+      for (const [tlds, urls] of json.services || []) {
+        for (const t of tlds) map[t.toLowerCase()] = urls;
+      }
+      rdapBootstrapCache = map;
+    }
+    return rdapBootstrapCache[tld] || [];
+  } catch { return []; }
+}
+
+function extractRdapExpiry(data: { events?: { eventAction?: string; eventDate?: string }[] } | null): string | null {
+  const expEvent = (data?.events || []).find(e => (e.eventAction || '').includes('expiration'));
+  return expEvent?.eventDate || null;
+}
+
+/** 域名到期:rdap.org 优先,失败回退 IANA bootstrap 直连注册局官方端点 */
+async function fetchDomainExpiry(domain: string): Promise<string | null> {
+  // 1) rdap.org 引导网关
+  const viaBootstrap = await fetchJson<{ events?: { eventAction?: string; eventDate?: string }[] }>(`https://rdap.org/domain/${encodeURIComponent(domain)}`);
+  const expiry = extractRdapExpiry(viaBootstrap);
+  if (expiry) return expiry;
+
+  // 2) 回退:直连注册局官方 RDAP 端点
+  const urls = await getBootstrapRdapUrls(domain);
+  for (const base of urls.slice(0, 2)) {
+    const data = await fetchJson<{ events?: { eventAction?: string; eventDate?: string }[] }>(`${base.replace(/\/+$/, '')}/domain/${encodeURIComponent(domain)}`);
+    const fallbackExpiry = extractRdapExpiry(data);
+    if (fallbackExpiry) return fallbackExpiry;
+  }
+  return null;
+}
+
 export async function updateDomainCertInfo(env: Bindings, monitor: Monitor): Promise<void> {
   try {
-    const urlObj = new URL(monitor.url);
+    const urlObj = new URL(normalizeMonitorUrl(monitor.url));
     const domain = urlObj.hostname;
     if (/^\d{1,3}(\.\d{1,3}){3}$/.test(domain)) return;
 
-    let certExpiry: string | null = null;
-    try {
-      const browserUA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
-      const fetchCerts = async (searchDomain: string): Promise<Record<string, unknown>[]> => {
-        try {
-          const res = await fetch(`https://crt.sh/?q=${searchDomain}&output=json`, { headers: { 'User-Agent': browserUA } });
-          if (!res.ok) return [];
-          try { return JSON.parse(await res.text()) as Record<string, unknown>[]; } catch { return []; }
-        } catch { return []; }
-      };
-
-      let certs = await fetchCerts(domain);
-      if (domain.split('.').length > 2) {
-        const parts = domain.split('.');
-        const rootDomain = parts.slice(parts.length - 2).join('.');
-        const [rootCerts, wildcardCerts] = await Promise.all([
-          fetchCerts(rootDomain),
-          fetchCerts(`%25.${rootDomain}`),
-        ]);
-        certs = [...certs, ...rootCerts, ...wildcardCerts];
-      }
-
-      if (certs.length > 0) {
-        const nowMs = Date.now();
-        const parseExpiry = (s: string) => new Date(s.replace(' ', 'T')).getTime();
-        const validCerts = certs.filter(c => { const exp = parseExpiry(c.not_after as string); return !isNaN(exp) && exp > nowMs; });
-        const source = validCerts.length > 0 ? validCerts : certs;
-        const sorted = source
-          .filter(c => c.not_after)
-          .sort((a, b) => parseExpiry(a.not_after as string) - parseExpiry(b.not_after as string));
-        if (sorted.length > 0) {
-          certExpiry = new Date(parseExpiry(sorted[0].not_after as string)).toISOString();
-        }
-      }
-    } catch { /* cert check failed, keep old */ }
-
-    let domainExpiry: string | null = null;
-    try {
-      const rdapRes = await fetch(`https://rdap.org/domain/${domain}`);
-      if (rdapRes.ok) {
-        const rdapData = await rdapRes.json<{ events?: { eventAction: string; eventDate: string }[] }>();
-        const expEvent = (rdapData.events || []).find(e => e.eventAction.includes('expiration'));
-        if (expEvent?.eventDate) domainExpiry = expEvent.eventDate;
-      }
-    } catch { /* rdap failed, keep old */ }
+    const [certExpiry, domainExpiry] = await Promise.all([
+      fetchLatestCertExpiry(domain),
+      fetchDomainExpiry(domain),
+    ]);
 
     await env.DB.prepare('UPDATE monitors SET cert_expiry = ?, domain_expiry = ? WHERE id = ?')
       .bind(certExpiry, domainExpiry, monitor.id).run();

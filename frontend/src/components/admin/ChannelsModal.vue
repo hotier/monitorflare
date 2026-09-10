@@ -319,7 +319,7 @@ import { useToast } from '../../composables/useToast';
 import { API_BASE, fetchT } from '../../utils/api';
 
 const { t } = useI18n();
-const emit = defineEmits(['close']);
+defineEmits(['close']);
 const { storedToken } = useAuth();
 const { addToast } = useToast();
 
