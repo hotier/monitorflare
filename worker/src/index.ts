@@ -34,6 +34,13 @@ const MONITOR_COLUMNS = `
 // ============================================================
 const app = new Hono<{ Bindings: Bindings }>();
 
+// 全局错误处理：未捕获的异常统一转成 JSON 并写日志。
+// 没有它的话，运行时异常只会返回一个没有任何信息的 Cloudflare 1101 错误页。
+app.onError((err, c) => {
+  console.error('Unhandled error:', err);
+  return c.json({ error: err instanceof Error ? err.message : 'Internal error' }, 500);
+});
+
 app.use('/*', cors({
   origin: (origin, c) => {
     const allowed = getAllowedOrigins(c.env);
@@ -63,11 +70,17 @@ app.use('/*', async (c, next) => {
   if (c.req.method === 'OPTIONS') return await next();
   const path = c.req.path;
 
-  // 初始化自检(幂等,首次访问自动建表)
-  await ensureInitialized(c.env);
+  // 初始化自检(幂等,首次访问自动建表)。
+  // 建表或读设置失败都不应该让整个 API 变成 1101：降级为默认公开可见性,并把真实错误写进日志。
+  let visibility = 'public';
+  try {
+    await ensureInitialized(c.env);
+    visibility = await getSetting(c.env, 'status_page_visibility') || 'public';
+  } catch (err) {
+    console.error('Database init/settings read failed:', err);
+  }
 
   // 私密模式:锁定状态页公开接口
-  const visibility = await getSetting(c.env, 'status_page_visibility');
   if (visibility === 'private'
     && !STATUS_LOCK_EXEMPT.some(p => path.startsWith(p))
     && STATUS_LOCK_PATHS.some(p => path === p || path.startsWith(p + '/'))) {

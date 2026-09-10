@@ -178,8 +178,14 @@ jobs:
           workingDirectory: worker
           command: deploy
 
-      # 首次运行自动生成管理员凭据并写进 Worker secret。
+      # 首次运行配置管理员凭据并写进 Worker secret。
       # 已存在的不覆盖，所以重复部署时密码保持稳定。
+      #
+      # 两点说明：
+      #   1) 走 Cloudflare REST API 而不是 `wrangler secret list --json`，
+      #      后者在部分版本会把升级提示混进 stdout，导致 jq 解析失败而整步跳过。
+      #   2) 本仓库是公开仓库，运行摘要/日志任何访客都能看到，
+      #      因此这里绝不输出自动生成的密码：管理员密码只能来自 Actions secret。
       - name: Provision admin credentials (first run only)
         working-directory: worker
         env:
@@ -189,37 +195,37 @@ jobs:
         run: |
           set -euo pipefail
 
-          # 读不到现状时保守跳过,避免误覆盖已有密码
-          if ! EXISTING=$(npx wrangler secret list --json 2>/dev/null | jq -r '.[].name' 2>/dev/null); then
-            echo "::warning::无法读取现有 secrets,跳过凭据生成"
+          API="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/$WORKER_NAME/secrets"
+
+          RESP=$(curl -sS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$API" 2>/dev/null || true)
+          if ! printf '%s' "$RESP" | jq -e '.success == true' > /dev/null 2>&1; then
+            echo "::warning::无法读取现有 secrets,跳过凭据配置（响应: $RESP）"
             exit 0
           fi
+
+          EXISTING=$(printf '%s' "$RESP" | jq -r '.result[]?.name // empty')
+
+          put_secret() {
+            jq -cn --arg n "$1" --arg v "$2" '{name: $n, value: $v, type: "secret_text"}' \
+              | curl -sS -X PUT -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+                  -H "Content-Type: application/json" "$API" --data @- \
+              | jq -e '.success' > /dev/null
+          }
 
           if printf '%s\n' "$EXISTING" | grep -qx "ADMIN_API_KEY"; then
             echo "::notice::ADMIN_API_KEY 已存在,保持不变"
           elif [ -n "${ADMIN_API_KEY_INPUT:-}" ]; then
-            printf '%s' "$ADMIN_API_KEY_INPUT" | npx wrangler secret put ADMIN_API_KEY
+            put_secret ADMIN_API_KEY "$ADMIN_API_KEY_INPUT"
+            echo "::notice::已用仓库 secret ADMIN_API_KEY 写入 Worker"
           else
-            ADMIN_KEY=$(openssl rand -hex 24)
-            printf '%s' "$ADMIN_KEY" | npx wrangler secret put ADMIN_API_KEY
-            {
-              echo "## MonitorFlare 管理员密码"
-              echo ""
-              echo "仅本次显示，请立即保存（后续部署不会覆盖它）："
-              echo ""
-              echo '```'
-              echo "$ADMIN_KEY"
-              echo '```'
-              echo ""
-              echo "更换方式：Cloudflare Dashboard → Workers → $WORKER_NAME → Settings → Variables and Secrets，"
-              echo "或本地执行 \`npx wrangler secret put ADMIN_API_KEY\`。"
-            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning::未配置管理员密码:请在本仓库 Settings → Secrets 添加 ADMIN_API_KEY（可本地 openssl rand -hex 24 生成）后重跑。本工作流不会输出自动生成的密码，因为公开仓库的运行摘要任何人可见。"
           fi
 
           if printf '%s\n' "$EXISTING" | grep -qx "MAGIC_LINK_SECRET"; then
             echo "::notice::MAGIC_LINK_SECRET 已存在,保持不变"
           else
-            openssl rand -hex 32 | npx wrangler secret put MAGIC_LINK_SECRET
+            put_secret MAGIC_LINK_SECRET "$(openssl rand -hex 32)"
+            echo "::notice::已生成并写入 MAGIC_LINK_SECRET（内容不输出）"
           fi
 
   deploy-pages:
