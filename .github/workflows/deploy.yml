@@ -6,8 +6,9 @@ on:
       - main
   workflow_dispatch:
 
+# checkout / setup-node 均已升到 v5，自带 node24 运行时，
+# 故不再需要 FORCE_JAVASCRIPT_ACTIONS_TO_NODE24 来压制 node20 弃用警告。
 env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   WORKER_NAME: monitorflare-worker
   D1_NAME: monitorflare-db
   PAGES_PROJECT: monitorflare
@@ -20,13 +21,17 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: '22'
           cache: 'npm'
+          # v5 新增：一旦 package.json 出现 packageManager 字段就会自动开缓存。
+          # 本仓库靠显式 cache-dependency-path 精确指定三个 lock 文件，
+          # 这里关掉自动推断，避免将来有人补上该字段后缓存键悄然改变。
+          package-manager-cache: false
           cache-dependency-path: |
             package-lock.json
             worker/package-lock.json
@@ -68,13 +73,14 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: '22'
           cache: 'npm'
+          package-manager-cache: false
           cache-dependency-path: worker/package-lock.json
 
       - name: Install dependencies
@@ -170,13 +176,15 @@ jobs:
           BASE_URL = "$BASE_URL"
           WRANGLER_EOF
 
+      # 直接用 worker 里锁定的 wrangler（devDependencies: wrangler ^4），
+      # 不再走 cloudflare/wrangler-action：它跑在已弃用的 node20 上，
+      # 还会额外装一个 wrangler@3.90.0，与本 job 其它步骤用的 v4 不一致。
       - name: Deploy Worker
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          workingDirectory: worker
-          command: deploy
+        working-directory: worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx wrangler deploy
 
       # 首次运行配置管理员凭据并写进 Worker secret。
       # 已存在的不覆盖，所以重复部署时密码保持稳定。
@@ -236,13 +244,14 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: '22'
           cache: 'npm'
+          package-manager-cache: false
           cache-dependency-path: frontend/package-lock.json
 
       - name: Install dependencies
@@ -257,13 +266,33 @@ jobs:
           VITE_FOOTER_AUTHOR: ${{ vars.VITE_FOOTER_AUTHOR }}
           VITE_FOOTER_URL: ${{ vars.VITE_FOOTER_URL }}
 
+      # `wrangler pages project create` 不是幂等的：项目已存在时返回 8000002
+      # 并以 exit code 1 退出。原先靠 continue-on-error 兜底，代价是每次部署
+      # 都会留下一条红色失败步骤。这里先用 REST API 探测，仅在缺失时才创建。
       - name: Create Pages project (if not exists)
-        continue-on-error: true
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages project create ${{ env.PAGES_PROJECT }} --production-branch=main
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+
+          API="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/pages/projects/$PAGES_PROJECT"
+
+          STATUS=$(curl -sS -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$API")
+
+          if [ "$STATUS" = "200" ]; then
+            echo "::notice::Pages 项目 $PAGES_PROJECT 已存在，跳过创建"
+            exit 0
+          fi
+
+          if [ "$STATUS" != "404" ]; then
+            echo "::error::查询 Pages 项目失败（HTTP $STATUS），请检查 CLOUDFLARE_API_TOKEN 是否具备 Pages:Edit 权限"
+            exit 1
+          fi
+
+          echo "Pages 项目 $PAGES_PROJECT 不存在，开始创建…"
+          npx --yes wrangler@4 pages project create "$PAGES_PROJECT" --production-branch=main
 
       - name: Resolve Worker URL
         id: worker_url
@@ -321,8 +350,7 @@ jobs:
           echo "::notice::已写入 Pages 环境变量 WORKER_URL=${{ steps.worker_url.outputs.url }}"
 
       - name: Deploy to Cloudflare Pages
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages deploy frontend/dist --project-name=${{ env.PAGES_PROJECT }} --branch=main --commit-dirty=true
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx --yes wrangler@4 pages deploy frontend/dist --project-name="$PAGES_PROJECT" --branch=main --commit-dirty=true
