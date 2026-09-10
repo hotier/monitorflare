@@ -308,21 +308,21 @@
 <script setup>
 import { computed, ref } from 'vue';
 import { useI18n } from 'vue-i18n';
-import { useAuth } from '../../composables/useAuth';
 import { useToast } from '../../composables/useToast';
 import { useConfirm } from '../../composables/useConfirm';
-import { API_BASE, fetchT } from '../../utils/api';
+import { API_BASE, authFetchT } from '../../utils/api';
+import * as resources from '../../composables/resources';
 import AppSelect from '../common/AppSelect.vue';
 
 const { t } = useI18n();
 defineEmits(['close']);
-const { storedToken } = useAuth();
 const { addToast } = useToast();
 const { confirmDialog } = useConfirm();
 
-const channels = ref([]);
-const channelsLoading = ref(false);
-const channelError = ref('');
+// 渠道数据来自模块级资源:弹窗关了再开直接渲染缓存,不再每次重新拉
+const channels = computed(() => resources.notificationChannels.data.value || []);
+const channelsLoading = computed(() => resources.notificationChannels.loading.value);
+const channelError = computed(() => (resources.notificationChannels.error.value ? t('channels.loadFailed') : ''));
 const editing = ref(null);
 const saving = ref(false);
 const testingId = ref(null);
@@ -359,24 +359,9 @@ const currentEditingInfo = computed(() => editing.value ? getTypeInfo(editing.va
 const getTypeInfo = (type) => typeInfo.value[type] || { ...fallbackTypeInfo(), label: type || t('channels.unknownChannel') };
 const isEnabled = (ch) => ch.enabled === true || Number(ch.enabled) === 1;
 
-const authFetch = async (url, options = {}) => {
-    const headers = { ...options.headers, 'Authorization': `Bearer ${storedToken.value}` };
-    return fetchT(url, { ...options, headers });
-};
-
-const fetchChannels = async () => {
-    channelsLoading.value = true;
-    channelError.value = '';
-    try {
-        const res = await authFetch(`${API_BASE}/notification-channels`);
-        if (res?.ok) channels.value = await res.json();
-        else channelError.value = t('channels.loadFailed');
-    } catch {
-        channelError.value = t('channels.loadFailed');
-    } finally {
-        channelsLoading.value = false;
-    }
-};
+/** 手动刷新(刷新按钮、出错重试)。打开弹窗时走 loadChannels,不强制请求 */
+const fetchChannels = () => resources.notificationChannels.refresh();
+const loadChannels = () => resources.notificationChannels.ensure();
 
 const baseConfig = (type) => {
     if (type === 'webhook') return { method: 'POST' };
@@ -417,7 +402,7 @@ const saveCh = async () => {
         const body = ch.id
             ? { type: ch.type, name: ch.name, config: ch.config }
             : { type: ch.type, name: ch.name, config: ch.config, enabled: 1 };
-        const res = await authFetch(url, { method: ch.id ? 'PATCH' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        const res = await authFetchT(url, { method: ch.id ? 'PATCH' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
         if (res.ok) {
             addToast(ch.id ? t('channels.updated') : t('channels.added'), 'success');
             editing.value = null;
@@ -451,7 +436,7 @@ const deleteCh = async (ch) => {
     if (!ok) return;
     deletingId.value = ch.id;
     try {
-        const res = await authFetch(`${API_BASE}/notification-channels/${ch.id}`, { method: 'DELETE' });
+        const res = await authFetchT(`${API_BASE}/notification-channels/${ch.id}`, { method: 'DELETE' });
         if (res.ok) {
             addToast(t('channels.deleted'), 'success');
             if (editing.value?.id === ch.id) editing.value = null;
@@ -470,7 +455,7 @@ const toggleCh = async (ch) => {
     togglingId.value = ch.id;
     try {
         const enabled = isEnabled(ch) ? 0 : 1;
-        const res = await authFetch(`${API_BASE}/notification-channels/${ch.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled }) });
+        const res = await authFetchT(`${API_BASE}/notification-channels/${ch.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled }) });
         if (res.ok) ch.enabled = enabled;
         else addToast(t('channels.operationFailed'), 'error');
     } catch {
@@ -484,7 +469,7 @@ const testCh = async (ch) => {
     testingId.value = ch.id;
     addToast(t('channels.testing'), 'info');
     try {
-        const res = await authFetch(`${API_BASE}/notification-channels/${ch.id}/test`, { method: 'POST' });
+        const res = await authFetchT(`${API_BASE}/notification-channels/${ch.id}/test`, { method: 'POST' });
         const d = await res.json();
         addToast(d.success ? t('channels.testSent') : t('channels.testFailed'), d.success ? 'success' : 'error');
     } catch {
@@ -494,5 +479,6 @@ const testCh = async (ch) => {
     }
 };
 
-fetchChannels();
+// ensure 而非 refresh:资源里有缓存就直接渲染,只有首次或超过 ttl 才真的请求
+loadChannels();
 </script>

@@ -201,10 +201,10 @@
 <script setup>
 import { computed, ref } from 'vue';
 import { useI18n } from 'vue-i18n';
-import { useAuth } from '../../composables/useAuth';
 import { useToast } from '../../composables/useToast';
 import { useConfirm } from '../../composables/useConfirm';
-import { API_BASE, fetchT } from '../../utils/api';
+import { API_BASE, authFetchT } from '../../utils/api';
+import * as resources from '../../composables/resources';
 import { formatDateFull } from '../../utils/format';
 import AppSelect from '../common/AppSelect.vue';
 import AppDateTimePicker from '../common/AppDateTimePicker.vue';
@@ -219,12 +219,13 @@ const props = defineProps({
     monitors: { type: Array, default: () => [] },
 });
 const emit = defineEmits(['close']);
-const { storedToken } = useAuth();
 const { addToast } = useToast();
 const { confirmDialog } = useConfirm();
 
-const incidents = ref([]);
-const loading = ref(false);
+// 事件数据来自模块级资源:弹窗关了再开直接渲染缓存,不再每次重新拉
+// 注意用的是 allIncidents(GET /incidents/all),与状态页的 publicIncidents 不是一份
+const incidents = computed(() => resources.allIncidents.data.value || []);
+const loading = computed(() => resources.allIncidents.loading.value);
 const submitting = ref(false);
 const defaultForm = () => ({
     title: '',
@@ -239,8 +240,6 @@ const form = ref(defaultForm());
 
 const activeCount = computed(() => incidents.value.filter(inc => inc.status === 'active').length);
 const maintenanceCount = computed(() => incidents.value.filter(inc => inc.type === 'maintenance' && inc.status === 'active').length);
-
-const authFetch = async (url, opts = {}) => fetchT(url, { ...opts, headers: { ...opts.headers, 'Authorization': `Bearer ${storedToken.value}` } });
 
 const resetForm = () => {
     form.value = defaultForm();
@@ -268,17 +267,10 @@ const validateForm = () => {
     return true;
 };
 
-const fetchIncidents = async () => {
-    loading.value = true;
-    try {
-        const r = await authFetch(`${API_BASE}/incidents/all`);
-        if (r.ok) incidents.value = await r.json();
-    } catch {
-        addToast(t('incidents.loadFailed'), 'error');
-    } finally {
-        loading.value = false;
-    }
-};
+/** 手动刷新(刷新按钮、增删改之后) */
+const fetchIncidents = () => resources.allIncidents.refresh();
+/** 打开弹窗时用:有缓存直接渲染,不重复请求 */
+const loadIncidents = () => resources.allIncidents.ensure();
 
 const create = async () => {
     if (!validateForm() || submitting.value) return;
@@ -297,7 +289,7 @@ const create = async () => {
 
     submitting.value = true;
     try {
-        const r = await authFetch(`${API_BASE}/incidents`, {
+        const r = await authFetchT(`${API_BASE}/incidents`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload),
@@ -318,7 +310,7 @@ const create = async () => {
 
 const resolve = async (inc) => {
     try {
-        const r = await authFetch(`${API_BASE}/incidents/${inc.id}`, {
+        const r = await authFetchT(`${API_BASE}/incidents/${inc.id}`, {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ status: 'resolved' }),
@@ -336,7 +328,7 @@ const remove = async (inc) => {
     const ok = await confirmDialog(t('incidents.deleteConfirm', { title: inc.title }));
     if (!ok) return;
     try {
-        const r = await authFetch(`${API_BASE}/incidents/${inc.id}`, { method: 'DELETE' });
+        const r = await authFetchT(`${API_BASE}/incidents/${inc.id}`, { method: 'DELETE' });
         if (r.ok) {
             addToast(t('incidents.deleted'), 'success');
             fetchIncidents();
@@ -375,5 +367,6 @@ const affectedLabel = (inc) => {
     return names.length > 0 ? names.join('、') : t('incidents.monitorCount', { count: ids.length });
 };
 
-fetchIncidents();
+// ensure 而非 refresh:资源里有缓存就直接渲染,只有首次或超过 ttl 才真的请求
+loadIncidents();
 </script>

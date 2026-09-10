@@ -88,8 +88,8 @@
           </div>
         </div>
         <div class="flex flex-wrap items-center justify-end gap-0.5 sm:gap-1 w-full sm:w-auto border-t sm:border-t-0 border-slate-100 dark:border-white/5 pt-2 sm:pt-0 mt-1 sm:mt-0">
-          <button @click="$emit('force-check', m)" class="p-2 text-slate-500 hover:text-green-500 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg transition-colors cursor-pointer disabled:opacity-50" :disabled="m._checking" :title="$t('adminPage.checkNow')">
-            <i class="fas fa-sync-alt text-sm" :class="{ 'fa-spin text-green-400': m._checking }"></i>
+          <button @click="$emit('force-check', m)" class="p-2 text-slate-500 hover:text-green-500 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg transition-colors cursor-pointer disabled:opacity-50" :disabled="checkingIds.has(m.id)" :title="$t('adminPage.checkNow')">
+            <i class="fas fa-sync-alt text-sm" :class="{ 'fa-spin text-green-400': checkingIds.has(m.id) }"></i>
           </button>
           <button @click="$emit('toggle-pause', m)" class="p-2 rounded-lg transition-colors cursor-pointer" :class="m.paused ? 'text-green-500 hover:bg-slate-100 dark:hover:bg-slate-800' : 'text-slate-400 dark:text-slate-500 hover:text-yellow-500 hover:bg-slate-100 dark:hover:bg-slate-800'" :title="m.paused ? $t('adminPage.resume') : $t('adminPage.pause')">
             <i :class="m.paused ? 'fas fa-play' : 'fas fa-pause'" class="text-sm"></i>
@@ -128,6 +128,9 @@ const props = defineProps({
     monitors: Array, filteredMonitors: Array, allTags: Array,
     activeTag: String, selectedIds: Array, searchQuery: String, sortKey: String, loading: Boolean,
     batchChecking: Boolean,
+    // 正在手动检测的监控 id 集合。以前是往监控对象上挂 _checking,但列表现在由
+    // computed 合并出来,每次重算都会重建对象,挂在对象上的标记会丢,所以改由父级集中持有。
+    checkingIds: { type: Object, default: () => new Set() },
 });
 const emit = defineEmits([
     'update:activeTag', 'update:selectedIds', 'update:searchQuery', 'update:sortKey',

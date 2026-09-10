@@ -47,7 +47,7 @@
       <div v-if="error" class="mb-6 glass rounded-xl p-4 flex items-center gap-3 border border-orange-300 dark:border-orange-500/40 bg-orange-50/80 dark:bg-orange-500/10 fade-up">
         <i class="fas fa-exclamation-circle text-orange-400 shrink-0"></i>
         <p class="text-sm text-orange-300 flex-1">{{ error }}</p>
-        <button @click="fetchMonitors" class="text-xs px-3 py-1.5 rounded-lg bg-orange-500/15 text-orange-400 hover:bg-orange-500/25 transition-colors font-medium cursor-pointer">{{ $t('common.retry') }}</button>
+        <button @click="reloadMonitors" class="text-xs px-3 py-1.5 rounded-lg bg-orange-500/15 text-orange-400 hover:bg-orange-500/25 transition-colors font-medium cursor-pointer">{{ $t('common.retry') }}</button>
       </div>
 
       <!-- 统计概览 -->
@@ -87,11 +87,12 @@
       <MonitorList v-else
         :monitors="monitors" :filteredMonitors="filteredMonitors" :allTags="allTags"
         :activeTag="activeTag" :selectedIds="selectedIds" :searchQuery="searchQuery" :sortKey="sortKey" :loading="loading" :batchChecking="batchChecking"
+        :checkingIds="checkingIds"
         @update:activeTag="activeTag = $event" @update:selectedIds="selectedIds = $event"
         @update:searchQuery="searchQuery = $event" @update:sortKey="sortKey = $event"
         @force-check="forceCheck" @toggle-pause="togglePause" @open-config="openConfig"
         @view-logs="viewLogs" @clone="cloneMonitor" @delete="deleteMonitor"
-        @batch-action="batchAction" @reorder="handleReorder" @refresh="fetchMonitors"
+        @batch-action="batchAction" @reorder="handleReorder" @refresh="reloadMonitors"
       />
     </main>
 
@@ -123,7 +124,7 @@
 
     <IncidentsModal v-if="showIncidents" :monitors="monitors" @close="showIncidents = false" />
 
-    <SettingsModal v-if="showSettings" :monitors="monitors" @close="showSettings = false" @saved="fetchSiteSettings" @import-done="fetchMonitors" />
+    <SettingsModal v-if="showSettings" :monitors="monitors" @close="showSettings = false" @saved="onSettingsSaved" @import-done="onImportDone" />
 
     <ApiKeysModal v-if="showApiKeys" @close="showApiKeys = false" />
 
@@ -132,14 +133,21 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue';
+// 组件名是 <keep-alive :include="[...]"> 的匹配依据(App.vue),改名会直接导致缓存失效
+defineOptions({ name: 'AdminPage' });
+
+import { ref, reactive, computed, watch, onMounted, onActivated, onDeactivated, onUnmounted } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useAuth } from '../composables/useAuth';
 import { useTheme } from '../composables/useTheme';
 import { useToast } from '../composables/useToast';
 import { useConfirm } from '../composables/useConfirm';
-import { API_BASE, fetchT, withRetry } from '../utils/api';
+// authFetchT = 带 Bearer 头 + 统一 401 处理(清 session 并回登录页)。
+// 原先只有本页内部的 authFetch 做了 401 处理,提到 utils/api 里共享,各弹窗行为一致。
+import { API_BASE, authFetchT, ADMIN_TOKEN_KEY } from '../utils/api';
 import { formatDateFull } from '../utils/format';
+// 列表、自检、站点配置都提到模块级资源,切页回来直接渲染缓存
+import * as resources from '../composables/resources';
 
 // 子组件
 import LoginDialog from '../components/admin/LoginDialog.vue';
@@ -166,11 +174,41 @@ const footerAuthor = import.meta.env.VITE_FOOTER_AUTHOR || 'MonitorFlare';
 const footerUrl = import.meta.env.VITE_FOOTER_URL || '#';
 
 // ── 核心状态 ──
-const monitors = ref([]);
-const loading = ref(false);
-const error = ref(null);
-const health = ref(null);
-const siteSettings = ref({});
+/** 空配置的稳定引用,避免 computed 每次返回新对象导致 watch 空转 */
+const EMPTY_SETTINGS = {};
+
+/**
+ * 监控列表 = 管理端配置(/monitors) + 公开状态数据(/monitors/public/details)
+ *
+ * 注意这里返回的是**新对象**(展开合并),不像以前那样就地往 adminData 的元素上挂
+ * _latency/_sparkData。原因是 computed 每次重算都会重建数组,任何"挂在监控对象上的
+ * 临时标记"都会随之丢失 —— 所以 _checking 这类标记一律改由组件集中持有。
+ */
+const monitors = computed(() => {
+    const pub = new Map((resources.publicMonitors.data.value?.monitors || []).map(m => [m.id, m]));
+    return (resources.adminMonitors.data.value || []).map(m => {
+        const p = pub.get(m.id);
+        return { ...m, _latency: p?.latency ?? null, _sparkData: p?.recent_latencies ?? null };
+    });
+});
+/** 骨架屏只在"还没有列表数据"时出现 */
+const loading = computed(() => resources.adminMonitors.loading.value);
+const health = computed(() => resources.health.data.value);
+const siteSettings = computed(() => resources.siteSettings.data.value || EMPTY_SETTINGS);
+
+const error = computed(() => {
+    const e = resources.adminMonitors.error.value;
+    if (!e) return null;
+    if (e.status) {
+        return e.detail
+            ? t('statusPage.apiError', { error: e.detail })
+            : t('adminPage.loadFailed', { status: e.status });
+    }
+    return t('statusPage.connectionTimeout');
+});
+
+/** 正在手动检测的监控 id。放在这里而不是挂在监控对象上,见 monitors 的注释 */
+const checkingIds = reactive(new Set());
 
 // ── 搜索/排序/筛选 ──
 const searchQuery = ref('');
@@ -208,17 +246,7 @@ const hasMoreLogs = ref(false);
 // ── 确认对话框(全局单例,渲染在 App.vue) ──
 const { confirmState, confirmDialog, resolveConfirm } = useConfirm();
 
-// ── 带鉴权 fetch ──
-const authFetch = async (url, options = {}) => {
-    const headers = { ...options.headers, 'Authorization': `Bearer ${storedToken.value}` };
-    const res = await fetchT(url, { ...options, headers });
-    if (res.status === 401) {
-        sessionStorage.removeItem('uptime_admin_token');
-        sessionStorage.removeItem('uptime_admin_password');
-        location.reload();
-    }
-    return res;
-};
+// 带鉴权请求统一走 utils/api 的 authFetchT,本页不再自带一份
 
 // ── 统计概览 ──
 const stats = computed(() => ({
@@ -254,50 +282,57 @@ const filteredMonitors = computed(() => {
 });
 
 // ── 数据获取 ──
-const fetchMonitors = async () => {
+/**
+ * 拉取(尊重 ttl)
+ *
+ * 用于挂载/切页回来:资源在 ttl 内直接命中缓存,不会每次切页都重新打接口。
+ * 需要"立刻看到最新数据"的场景请用 reloadMonitors / reloadAll。
+ */
+const loadAll = () => {
     if (!isAuthenticated.value) return;
-    loading.value = true; error.value = null;
-    try {
-        const [adminRes, publicRes] = await Promise.all([
-            withRetry(() => authFetch(`${API_BASE}/monitors`)),
-            fetchT(`${API_BASE}/monitors/public/details`).catch(() => null)
-        ]);
-        if (adminRes && adminRes.ok) {
-            const adminData = await adminRes.json();
-            let publicMap = {};
-            if (publicRes && publicRes.ok) { try { const pd = await publicRes.json(); (pd.monitors || []).forEach(pm => { publicMap[pm.id] = pm; }); } catch {} }
-            monitors.value = adminData.map(m => { const pm = publicMap[m.id]; m._latency = pm?.latency ?? null; m._sparkData = pm?.recent_latencies ?? null; return m; });
-        } else {
-            let errorMsg = t('adminPage.loadFailed', { status: adminRes?.status || t('common.networkError') });
-            if (adminRes) { try { const d = await adminRes.json(); if (d?.error) errorMsg = t('statusPage.apiError', { error: d.error }); } catch {} }
-            error.value = errorMsg;
-        }
-    } catch { error.value = t('statusPage.connectionTimeout'); }
-    finally { loading.value = false; }
+    resources.adminMonitors.ensure();
+    resources.publicMonitors.ensure();
+    resources.health.ensure();
+    resources.siteSettings.ensure();
 };
 
-const fetchHealth = async () => {
+/** 强制刷新列表(增删改、手动检测、批量操作之后用) */
+const reloadMonitors = () => {
     if (!isAuthenticated.value) return;
-    try {
-        const res = await authFetch(`${API_BASE}/health`);
-        if (res.ok) health.value = await res.json();
-    } catch {}
+    resources.adminMonitors.refresh();
+    resources.publicMonitors.refresh();
 };
 
-// 站点品牌信息(logo/标题),与状态页一致
-const fetchSiteSettings = async () => {
-    try {
-        const res = await fetchT(`${API_BASE}/settings`);
-        if (res.ok) {
-            siteSettings.value = await res.json();
-            if (siteSettings.value.site_title) document.title = siteSettings.value.site_title;
-            const meta = document.querySelector('meta[name=description]');
-            if (meta && siteSettings.value.site_description) meta.content = siteSettings.value.site_description;
-        }
-    } catch {}
+/** 强制刷新全部 */
+const reloadAll = () => {
+    if (!isAuthenticated.value) return;
+    reloadMonitors();
+    resources.health.refresh();
 };
 
-const onLogin = () => { fetchMonitors(); fetchHealth(); fetchSiteSettings(); };
+const fetchHealth = () => { if (isAuthenticated.value) resources.health.refresh(); };
+
+/** 站点品牌信息(logo/标题),与状态页共用同一份资源 */
+const applyBranding = () => {
+    const s = siteSettings.value;
+    if (s.site_title) document.title = s.site_title;
+    const meta = document.querySelector('meta[name=description]');
+    if (meta && s.site_description) meta.content = s.site_description;
+};
+
+// 资源里已有数据时立刻套用一次,之后每次更新再套用
+watch(siteSettings, applyBranding, { immediate: true });
+
+/** 设置弹窗保存成功后:站点配置要立刻刷新,否则状态页还挂着旧标题/logo */
+const onSettingsSaved = () => {
+    resources.siteSettings.refresh();
+    applyBranding();
+};
+
+const onLogin = () => { reloadAll(); resources.siteSettings.ensure(); };
+
+// 导入完成后:先立刻刷新,再等首次探测跑完补一次,让新导入的监控尽快显示延迟
+const onImportDone = () => { reloadMonitors(); setTimeout(reloadMonitors, 3000); };
 
 // ── 添加监控 ──
 const addMonitor = async () => {
@@ -314,8 +349,16 @@ const addMonitor = async () => {
             config = JSON.stringify({ port: portNum });
         }
         const body = { ...rest, type, config, check_ssl: newMonitor.value.check_ssl ? 1 : 0, check_domain: newMonitor.value.check_domain ? 1 : 0, interval: Number(newMonitor.value.interval) };
-        const res = await authFetch(`${API_BASE}/monitors`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-        if (res.ok) { newMonitor.value = { name: '', url: '', type: 'http', record_type: 'A', expected: '', port: 443, method: 'GET', keyword: '', user_agent: '', tags: '', request_headers: '', request_body: '', interval: 300, check_ssl: true, check_domain: true, alert_silence_hours: '24', alert_error_rate: 0 }; showAddModal.value = false; addToast(t('adminPage.monitorAdded'), 'success'); fetchMonitors(); }
+        const res = await authFetchT(`${API_BASE}/monitors`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        if (res.ok) {
+            const created = await res.json();
+            newMonitor.value = { name: '', url: '', type: 'http', record_type: 'A', expected: '', port: 443, method: 'GET', keyword: '', user_agent: '', tags: '', request_headers: '', request_body: '', interval: 300, check_ssl: true, check_domain: true, alert_silence_hours: '24', alert_error_rate: 0 };
+            showAddModal.value = false;
+            addToast(t('adminPage.monitorAdded'), 'success');
+            await reloadMonitors();
+            // 服务端在创建后异步执行首次探测,稍后再拉一次以尽快显示第一个延迟
+            if (created?.id) setTimeout(reloadMonitors, 2500);
+        }
         else { const d = await res.json(); addToast(d.error || t('common.addFailed'), 'error'); }
     } catch { addToast(t('common.networkError'), 'error'); }
     finally { submitting.value = false; }
@@ -324,19 +367,21 @@ const addMonitor = async () => {
 // ── 删除 ──
 const deleteMonitor = async (m) => {
     const ok = await confirmDialog(t('adminPage.confirmDelete', { name: m.name })); if (!ok) return;
-    try { const res = await authFetch(`${API_BASE}/monitors/${m.id}`, { method: 'DELETE' }); if (res.ok) { addToast(t('adminPage.deleted', { name: m.name }), 'success'); fetchMonitors(); } else { addToast(t('common.deleteFailed'), 'error'); } } catch { addToast(t('common.networkError'), 'error'); }
+    try { const res = await authFetchT(`${API_BASE}/monitors/${m.id}`, { method: 'DELETE' }); if (res.ok) { addToast(t('adminPage.deleted', { name: m.name }), 'success'); reloadMonitors(); } else { addToast(t('common.deleteFailed'), 'error'); } } catch { addToast(t('common.networkError'), 'error'); }
 };
 
 // ── 手动检测 ──
 const forceCheck = async (m) => {
-    if (m._checking) return; m._checking = true;
-    try { const res = await authFetch(`${API_BASE}/monitors/${m.id}/check`, { method: 'POST' }); if (res.ok) { addToast(t('adminPage.updated', { name: m.name }), 'success'); fetchMonitors(); } } catch { addToast(t('common.networkError'), 'error'); }
-    finally { m._checking = false; }
+    // 用 id 集合判重,不再往监控对象上挂 _checking:列表是 computed 出来的,对象会被重建
+    if (checkingIds.has(m.id)) return;
+    checkingIds.add(m.id);
+    try { const res = await authFetchT(`${API_BASE}/monitors/${m.id}/check`, { method: 'POST' }); if (res.ok) { addToast(t('adminPage.updated', { name: m.name }), 'success'); reloadMonitors(); } } catch { addToast(t('common.networkError'), 'error'); }
+    finally { checkingIds.delete(m.id); }
 };
 
 // ── 暂停/恢复 ──
 const togglePause = async (m) => {
-    try { const res = await authFetch(`${API_BASE}/monitors/${m.id}/pause`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ paused: m.paused ? 0 : 1 }) }); if (res.ok) { const d = await res.json(); addToast(d.paused ? t('adminPage.paused', { name: m.name }) : t('adminPage.resumed', { name: m.name }), 'info'); fetchMonitors(); } else { addToast(t('common.actionFailed'), 'error'); } } catch { addToast(t('common.networkError'), 'error'); }
+    try { const res = await authFetchT(`${API_BASE}/monitors/${m.id}/pause`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ paused: m.paused ? 0 : 1 }) }); if (res.ok) { const d = await res.json(); addToast(d.paused ? t('adminPage.paused', { name: m.name }) : t('adminPage.resumed', { name: m.name }), 'info'); reloadMonitors(); } else { addToast(t('common.actionFailed'), 'error'); } } catch { addToast(t('common.networkError'), 'error'); }
 };
 
 // ── 克隆 ──
@@ -359,21 +404,59 @@ const saveConfig = async () => {
     configSaving.value = true;
     try {
         const body = { name: configForm.value.name, url: configForm.value.url, method: configForm.value.method || 'GET', keyword: configForm.value.keyword, user_agent: configForm.value.user_agent, tags: configForm.value.tags || '', request_headers: configForm.value.request_headers || '', request_body: configForm.value.request_body || '', interval: Number(configForm.value.interval), check_ssl: configForm.value.check_ssl ? 1 : 0, check_domain: configForm.value.check_domain ? 1 : 0, alert_silence_uptime: Number(configForm.value.alert_silence_uptime), alert_silence_ssl: Number(configForm.value.alert_silence_ssl), alert_silence_domain: Number(configForm.value.alert_silence_domain), alert_error_rate: Number(configForm.value.alert_error_rate ?? 0) };
-        const res = await authFetch(`${API_BASE}/monitors/${configTarget.value.id}/config`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-        if (res.ok) { addToast(t('adminPage.saved'), 'success'); showConfig.value = false; fetchMonitors(); }
+        const res = await authFetchT(`${API_BASE}/monitors/${configTarget.value.id}/config`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        if (res.ok) { addToast(t('adminPage.saved'), 'success'); showConfig.value = false; reloadMonitors(); }
         else { const d = await res.json(); addToast(d.error || t('common.saveFailed'), 'error'); }
     } catch { addToast(t('common.networkError'), 'error'); }
     finally { configSaving.value = false; }
 };
 
 // ── 日志 ──
+// 按监控 id 缓存日志:30 秒内重开同一个监控的日志面板直接渲染,不再重新拉。
+// 缓存放在组件里就够 —— AdminPage 被 keep-alive 保住了,切页不会丢。
+const logsCache = new Map();
+const LOGS_TTL = 30000;
+
 const viewLogs = async (monitor) => {
-    currentMonitor.value = monitor; logs.value = []; logOffset.value = 0; hasMoreLogs.value = false; logsLoading.value = true; showLogs.value = true;
-    try { const res = await authFetch(`${API_BASE}/monitors/${monitor.id}/logs?limit=${logLimit}&offset=0`); if (res.ok) { const d = await res.json(); logs.value = d; hasMoreLogs.value = d.length >= logLimit; logOffset.value = d.length; } } catch {} finally { logsLoading.value = false; }
+    currentMonitor.value = monitor;
+    showLogs.value = true;
+
+    const cached = logsCache.get(monitor.id);
+    if (cached && Date.now() - cached.at < LOGS_TTL) {
+        logs.value = cached.logs;
+        logOffset.value = cached.offset;
+        hasMoreLogs.value = cached.hasMore;
+        logsLoading.value = false;
+        return;
+    }
+
+    logs.value = []; logOffset.value = 0; hasMoreLogs.value = false; logsLoading.value = true;
+    try {
+        const res = await authFetchT(`${API_BASE}/monitors/${monitor.id}/logs?limit=${logLimit}&offset=0`);
+        if (res.ok) {
+            const d = await res.json();
+            // 晚到的响应不能覆盖:用户可能已经点开另一个监控了
+            if (currentMonitor.value?.id !== monitor.id) return;
+            logs.value = d;
+            hasMoreLogs.value = d.length >= logLimit;
+            logOffset.value = d.length;
+            logsCache.set(monitor.id, { logs: d, offset: logOffset.value, hasMore: hasMoreLogs.value, at: Date.now() });
+        }
+    } catch {} finally { logsLoading.value = false; }
 };
 const loadMoreLogs = async () => {
     if (!currentMonitor.value || logsLoading.value) return; logsLoading.value = true;
-    try { const res = await authFetch(`${API_BASE}/monitors/${currentMonitor.value.id}/logs?limit=${logLimit}&offset=${logOffset.value}`); if (res.ok) { const d = await res.json(); logs.value = [...logs.value, ...d]; hasMoreLogs.value = d.length >= logLimit; logOffset.value += d.length; } } catch {} finally { logsLoading.value = false; }
+    try {
+        const res = await authFetchT(`${API_BASE}/monitors/${currentMonitor.value.id}/logs?limit=${logLimit}&offset=${logOffset.value}`);
+        if (res.ok) {
+            const d = await res.json();
+            logs.value = [...logs.value, ...d];
+            hasMoreLogs.value = d.length >= logLimit;
+            logOffset.value += d.length;
+            // 连"加载更多"的结果一起缓存,否则重开面板会丢掉已经翻过的页
+            logsCache.set(currentMonitor.value.id, { logs: logs.value, offset: logOffset.value, hasMore: hasMoreLogs.value, at: Date.now() });
+        }
+    } catch {} finally { logsLoading.value = false; }
 };
 
 // ── Sparkline / Uptime 计算 ──
@@ -420,7 +503,7 @@ const batchAction = async (action) => {
     if (action === 'delete') { const ok = await confirmDialog(t('adminPage.batchConfirm', { count: selectedIds.value.length })); if (!ok) return; }
     if (action === 'check') batchChecking.value = true;
     try {
-        const res = await authFetch(`${API_BASE}/monitors/batch`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action, ids: selectedIds.value }) });
+        const res = await authFetchT(`${API_BASE}/monitors/batch`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action, ids: selectedIds.value }) });
         if (res.ok) {
             const d = await res.json();
             if (action === 'check') {
@@ -429,7 +512,7 @@ const batchAction = async (action) => {
                 addToast(t('adminPage.batchSuccess', { count: d.affected ?? selectedIds.value.length }), 'success');
                 selectedIds.value = [];
             }
-            fetchMonitors();
+            reloadMonitors();
         } else { addToast(t('adminPage.batchFailed'), 'error'); }
     } catch { addToast(t('common.networkError'), 'error'); }
     finally { if (action === 'check') batchChecking.value = false; }
@@ -437,7 +520,7 @@ const batchAction = async (action) => {
 
 // ── 排序 ──
 const handleReorder = async (ids) => {
-    try { await authFetch(`${API_BASE}/monitors/reorder`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids }) }); addToast(t('adminPage.orderSaved'), 'success'); fetchMonitors(); } catch { addToast(t('adminPage.orderSaveFailed'), 'error'); }
+    try { await authFetchT(`${API_BASE}/monitors/reorder`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids }) }); addToast(t('adminPage.orderSaved'), 'success'); reloadMonitors(); } catch { addToast(t('adminPage.orderSaveFailed'), 'error'); }
 };
 
 // ── 导出 ──
@@ -449,23 +532,47 @@ const exportMonitors = () => {
     addToast(t('adminPage.exported', { count: data.length }), 'success');
 };
 
-// ── 键盘快捷键 ──
+// ── 键盘快捷键与轮询的启停 ──
+// keep-alive 下 onUnmounted 不会触发,所以这两样都必须挂到 onDeactivated 上:
+// 否则停在状态页时后台仍在每 30 秒轮询,按 r / n / / 还会操作到不可见的管理页。
+// (原先这个 setInterval 连句柄都没存、keydown 也没解绑,是这轮改造最容易出问题的地方。)
+const onKeydown = (e) => {
+    if (['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)) return;
+    if (e.key === 'Escape') { showAddModal.value = false; showLogs.value = false; showConfig.value = false; showChannels.value = false; showIncidents.value = false; showSettings.value = false; if (confirmState.value.show) resolveConfirm(false); }
+    if ((e.key === 'n' || e.key === 'N') && !showAddModal.value && !showLogs.value && !showConfig.value) { e.preventDefault(); showAddModal.value = true; }
+    if ((e.key === 'r' || e.key === 'R') && !showAddModal.value && !showLogs.value && !showConfig.value) { e.preventDefault(); reloadMonitors(); }
+    if (e.key === '/' && !showAddModal.value && !showLogs.value && !showConfig.value) { e.preventDefault(); document.querySelector('.search-input')?.focus(); }
+};
+
+let _timer = null;
+// start 做成幂等:首次进入时 onMounted 与 onActivated 会连续触发,不能重复注册
+const startActive = () => {
+    if (_timer) return;
+    _timer = setInterval(loadAll, 30000);
+    document.addEventListener('keydown', onKeydown);
+};
+const stopActive = () => {
+    if (_timer) { clearInterval(_timer); _timer = null; }
+    document.removeEventListener('keydown', onKeydown);
+};
+
 onMounted(() => {
     // OAuth 回调:URL hash 中携带 token(#/admin?token=xxx)时直接保存
     const hashToken = new URLSearchParams(window.location.hash.split('?')[1] || '').get('token');
     if (hashToken && !storedToken.value) {
-        sessionStorage.setItem('uptime_admin_token', hashToken);
+        sessionStorage.setItem(ADMIN_TOKEN_KEY, hashToken);
         storedToken.value = hashToken;
         // 清理 URL 中的 token,避免泄露
         history.replaceState(null, '', window.location.pathname);
     }
-    if (isAuthenticated.value) { fetchMonitors(); fetchHealth(); fetchSiteSettings(); setInterval(fetchMonitors, 30000); }
-    document.addEventListener('keydown', (e) => {
-        if (['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)) return;
-        if (e.key === 'Escape') { showAddModal.value = false; showLogs.value = false; showConfig.value = false; showChannels.value = false; showIncidents.value = false; showSettings.value = false; if (confirmState.value.show) resolveConfirm(false); }
-        if ((e.key === 'n' || e.key === 'N') && !showAddModal.value && !showLogs.value && !showConfig.value) { e.preventDefault(); showAddModal.value = true; }
-        if ((e.key === 'r' || e.key === 'R') && !showAddModal.value && !showLogs.value && !showConfig.value) { e.preventDefault(); fetchMonitors(); }
-        if (e.key === '/' && !showAddModal.value && !showLogs.value && !showConfig.value) { e.preventDefault(); document.querySelector('.search-input')?.focus(); }
-    });
+    loadAll();
+    startActive();
 });
+onActivated(() => {
+    startActive();
+    applyBranding();
+    loadAll();
+});
+onDeactivated(stopActive);
+onUnmounted(stopActive);
 </script>

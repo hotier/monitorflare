@@ -111,19 +111,19 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue';
 import { useI18n } from 'vue-i18n';
-import { useAuth } from '../../composables/useAuth';
 import { useToast } from '../../composables/useToast';
 import { useConfirm } from '../../composables/useConfirm';
-import { API_BASE, fetchT } from '../../utils/api';
+import { API_BASE, authFetchT } from '../../utils/api';
 import { formatDate } from '../../utils/format';
+import * as resources from '../../composables/resources';
 
 const { t } = useI18n();
 const emit = defineEmits(['close']);
-const { storedToken } = useAuth();
 const { addToast } = useToast();
 const { confirmDialog } = useConfirm();
 
-const keys = ref([]);
+// 密钥列表来自模块级资源:弹窗关了再开直接渲染缓存,不再每次重新拉
+const keys = computed(() => resources.apiKeys.data.value || []);
 const newKeyName = ref('');
 const newKey = ref('');
 const creating = ref(false);
@@ -131,8 +131,6 @@ const deletingId = ref(null);
 const copied = ref(false);
 // 用法示例默认收起(想默认展开改成 ref(true) 即可)
 const usageOpen = ref(false);
-
-const authFetch = async (url, opts = {}) => fetchT(url, { ...opts, headers: { ...opts.headers, 'Authorization': `Bearer ${storedToken.value}` } });
 
 const usageExample = computed(() => {
     const o = location.origin;
@@ -154,18 +152,16 @@ curl -H "Authorization: Bearer ut_your_key" "${o}/api/v1/uptime?days=90"
 curl -H "Authorization: Bearer ut_your_key" ${o}/api/v1/export`;
 });
 
-const fetchKeys = async () => {
-    try {
-        const r = await authFetch(`${API_BASE}/api-keys`);
-        if (r.ok) keys.value = await r.json();
-    } catch {}
-};
+/** 手动刷新(增删之后) */
+const fetchKeys = () => resources.apiKeys.refresh();
+/** 打开弹窗时用:有缓存直接渲染,不重复请求 */
+const loadKeys = () => resources.apiKeys.ensure();
 
 const createKey = async () => {
     if (!newKeyName.value || creating.value) return;
     creating.value = true;
     try {
-        const r = await authFetch(`${API_BASE}/api-keys`, {
+        const r = await authFetchT(`${API_BASE}/api-keys`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ name: newKeyName.value }),
@@ -204,9 +200,10 @@ const deleteKey = async (k) => {
     if (!ok) return;
     deletingId.value = k.id;
     try {
-        const r = await authFetch(`${API_BASE}/api-keys/${k.id}`, { method: 'DELETE' });
+        const r = await authFetchT(`${API_BASE}/api-keys/${k.id}`, { method: 'DELETE' });
         if (r.ok) {
-            keys.value = keys.value.filter(x => x.id !== k.id);
+            // keys 现在是 computed,不能就地赋值,交给资源重新拉一次
+            await fetchKeys();
             addToast(t('apiKeys.deleted'), 'success');
         } else {
             addToast(t('common.actionFailed'), 'error');
@@ -218,5 +215,6 @@ const deleteKey = async (k) => {
     }
 };
 
-onMounted(fetchKeys);
+// ensure 而非 refresh:资源里有缓存就直接渲染,只有首次或超过 ttl 才真的请求
+onMounted(loadKeys);
 </script>

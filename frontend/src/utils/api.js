@@ -2,6 +2,9 @@
 
 export const API_BASE = '/api';
 export const STATUS_TOKEN_KEY = 'monitorflare_status_token';
+/** 管理端登录态:token 与遗留的密码缓存,登出/401 时都要清 */
+export const ADMIN_TOKEN_KEY = 'uptime_admin_token';
+export const ADMIN_PASSWORD_KEY = 'uptime_admin_password';
 
 /**
  * 带超时的 fetch
@@ -13,6 +16,26 @@ export const fetchT = (url, opts = {}, ms = 15000) => {
     const token = localStorage.getItem(STATUS_TOKEN_KEY);
     if (token && !headers['Authorization']) headers['Authorization'] = `Bearer ${token}`;
     return fetch(url, { ...opts, headers, signal: c.signal }).finally(() => clearTimeout(t));
+};
+
+/**
+ * 管理端带鉴权请求:附 Bearer 头 + 统一处理 401
+ *
+ * 401 意味着 sessionStorage 里的 token 已失效(过期/被改),此时清掉登录态并整页刷新,
+ * 回到登录界面。这是原先 AdminPage 内部 authFetch 的行为,提到这里共享,避免各弹窗
+ * 各写一份、行为不一致。
+ */
+export const authFetchT = async (url, opts = {}) => {
+    const headers = { ...(opts.headers || {}) };
+    const token = sessionStorage.getItem(ADMIN_TOKEN_KEY) || '';
+    if (!headers['Authorization']) headers['Authorization'] = `Bearer ${token}`;
+    const res = await fetchT(url, { ...opts, headers });
+    if (res.status === 401) {
+        sessionStorage.removeItem(ADMIN_TOKEN_KEY);
+        sessionStorage.removeItem(ADMIN_PASSWORD_KEY);
+        location.reload();
+    }
+    return res;
 };
 
 /**

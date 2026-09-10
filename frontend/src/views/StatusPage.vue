@@ -1,16 +1,16 @@
 <template>
   <div class="min-h-screen flex flex-col text-slate-800 dark:text-slate-200 grid-bg">
-    <StatusHeader :loading="loading" :isDark="isDark" :siteSettings="siteSettings" @toggle-theme="toggleTheme" />
+    <StatusHeader :loading="loading" :isDark="isDark" :siteSettings="settings" @toggle-theme="toggleTheme" />
 
     <main class="flex-1 max-w-5xl w-full mx-auto px-6 py-10">
       <!-- 锁屏(私密模式) -->
-      <StatusLockScreen v-if="locked" :title="siteSettings.site_title || 'MonitorFlare'" @unlocked="onUnlocked" />
+      <StatusLockScreen v-if="locked" :title="settings.site_title || 'MonitorFlare'" @unlocked="onUnlocked" />
 
       <template v-else>
       <!-- 英雄状态区 -->
       <HeroBanner v-if="monitors.length > 0" :monitors="monitors" :activeMonitors="activeMonitors"
         :allUp="allUp" :hasRetrying="hasRetrying" :hasDown="hasDown" :avgLatency="avgLatency" :error="error"
-        @retry="fetchMonitors" />
+        @retry="loadMonitors" />
 
       <!-- 加载占位 -->
       <div v-if="loading && monitors.length === 0" class="space-y-3 fade-up-d2">
@@ -113,11 +113,17 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue';
+// 组件名是 <keep-alive :include="[...]"> 的匹配依据(App.vue),改名会直接导致缓存失效
+defineOptions({ name: 'StatusPage' });
+
+import { ref, computed, onMounted, onActivated, onDeactivated, onUnmounted } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useTheme } from '../composables/useTheme';
-import { API_BASE, fetchT, withRetry, isStatusLocked, statusLogout, STATUS_TOKEN_KEY } from '../utils/api';
+import { API_BASE, fetchT, isStatusLocked, statusLogout, STATUS_TOKEN_KEY } from '../utils/api';
 import { formatDate, formatNow } from '../utils/format';
+// 跨页共享的数据。这些资源是模块级的,切页不会丢 —— 有数据时 loading 保持 false,
+// 所以从详情页/管理页切回来是直接渲染,不再闪骨架屏。
+import * as resources from '../composables/resources';
 
 import StatusHeader from '../components/status/StatusHeader.vue';
 import HeroBanner from '../components/status/HeroBanner.vue';
@@ -128,19 +134,45 @@ import StatusLockScreen from '../components/status/StatusLockScreen.vue';
 const { t } = useI18n();
 const { isDark, toggleTheme } = useTheme('theme');
 
-const monitors = ref([]);
-const loading = ref(false);
-const error = ref(null);
+/** 资源首次加载完成前 data 是 null,模板直接取字段会报错 —— 用默认值兜底 */
+const DEFAULT_SETTINGS = { site_title: 'MonitorFlare', site_description: '', site_logo_url: '' };
+
+const monitors = computed(() => resources.publicMonitors.data.value?.monitors || []);
+const incidents = computed(() => resources.publicIncidents.data.value || []);
+const settings = computed(() => resources.siteSettings.data.value || DEFAULT_SETTINGS);
+
+/** 骨架屏只在"真的没数据可渲染"时出现,不看 refreshing */
+const loading = computed(() => resources.publicMonitors.loading.value);
+
+/** 把资源的 Error 翻译成用户可见文案。locked 单独走锁屏,不当错误报 */
+const error = computed(() => {
+    const e = resources.publicMonitors.error.value;
+    if (!e || e.locked) return null;
+    if (e.status) {
+        return e.detail
+            ? t('statusPage.apiError', { error: e.detail })
+            : t('statusPage.serverError', { status: e.status });
+    }
+    return t('statusPage.connectionTimeout');
+});
+
 const lastUpdated = ref('');
 const refreshing = ref(false);
-const incidents = ref([]);
-const siteSettings = ref({ site_title: 'MonitorFlare', site_description: '', site_logo_url: '' });
 const subEmail = ref('');
 const subMsg = ref('');
 const subOk = ref(false);
 const subscribing = ref(false);
-const locked = ref(false);
 const statusToken = ref(localStorage.getItem(STATUS_TOKEN_KEY) || '');
+
+/**
+ * 手动置为锁定态。用户主动退出、或订阅接口返回锁定时用。
+ * 计算属性不能直接写,所以需要一个本地标志跟资源的 locked 做"或"。
+ */
+const forceLocked = ref(false);
+const locked = computed(() => forceLocked.value
+    || resources.publicMonitors.locked.value
+    || resources.publicIncidents.locked.value
+    || resources.siteSettings.locked.value);
 
 const activeMonitors = computed(() => monitors.value.filter(m => m.paused !== 1 && m.status !== 'PAUSED'));
 const allUp = computed(() => activeMonitors.value.length > 0 && activeMonitors.value.every(m => m.status === 'UP'));
@@ -161,64 +193,46 @@ const monitorSections = computed(() => {
     return [...groups.entries()].map(([name, items]) => ({ name, items }));
 });
 
-const fetchMonitors = async () => {
-    loading.value = true;
-    error.value = null;
-    try {
-        const res = await withRetry(() => fetchT(`${API_BASE}/monitors/public/details`));
-        if (await isStatusLocked(res)) {
-            locked.value = true;
-            monitors.value = [];
-            return;
-        }
-        if (res.ok) {
-            const data = await res.json();
-            monitors.value = data.monitors || [];
-            lastUpdated.value = formatNow();
-        } else {
-            let errorMsg = t('statusPage.serverError', { status: res.status });
-            try { const d = await res.json(); if (d?.error) errorMsg = t('statusPage.apiError', { error: d.error }); } catch {}
-            error.value = errorMsg;
-        }
-    } catch {
-        error.value = t('statusPage.connectionTimeout');
-    } finally {
-        loading.value = false;
-    }
+/**
+ * 品牌信息写进 document.title / meta
+ *
+ * 单独抽出来是因为详情页也会改标题,从详情返回时必须重新盖回站点标题 ——
+ * 只在 watch 里做会漏掉"数据没变但标题被别人改过"的情况。
+ */
+const applyBranding = () => {
+    if (settings.value.site_title) document.title = settings.value.site_title;
+    const meta = document.querySelector('meta[name=description]');
+    if (meta && settings.value.site_description) meta.content = settings.value.site_description;
+};
+
+const loadMonitors = async () => {
+    await resources.publicMonitors.ensure();
+    // 命中缓存直接返回时这里的 formatNow 会有最多 ttl(15s)的偏差,
+    // 但展示的是"数据的新鲜程度",可接受;失败时不动,避免给出误导性时间
+    if (!resources.publicMonitors.error.value) lastUpdated.value = formatNow();
 };
 
 const manualRefresh = async () => {
     refreshing.value = true;
-    await fetchMonitors();
+    await resources.publicMonitors.refresh();
+    if (!resources.publicMonitors.error.value) lastUpdated.value = formatNow();
     setTimeout(() => { refreshing.value = false; }, 700);
 };
 
-const fetchIncidents = async () => {
-    try {
-        const r = await withRetry(() => fetchT(`${API_BASE}/incidents`));
-        if (await isStatusLocked(r)) { locked.value = true; return; }
-        if (r.ok) incidents.value = await r.json();
-    } catch {}
-};
-
+const fetchIncidents = () => resources.publicIncidents.ensure();
 const fetchSettings = async () => {
-    try {
-        const r = await fetchT(`${API_BASE}/settings`);
-        if (await isStatusLocked(r)) { locked.value = true; return; }
-        if (r.ok) {
-            const d = await r.json();
-            siteSettings.value = d;
-            if (d.site_title) document.title = d.site_title;
-            const meta = document.querySelector('meta[name=description]');
-            if (meta && d.site_description) meta.content = d.site_description;
-        }
-    } catch {}
+    await resources.siteSettings.ensure();
+    applyBranding();
 };
 
 const onUnlocked = () => {
-    locked.value = false;
+    forceLocked.value = false;
     statusToken.value = localStorage.getItem(STATUS_TOKEN_KEY) || '';
-    fetchMonitors();
+    // 解锁换了 token,之前被 401 挡下的数据和 locked 标记都要清掉重来
+    resources.publicMonitors.invalidate();
+    resources.publicIncidents.invalidate();
+    resources.siteSettings.invalidate();
+    loadMonitors();
     fetchIncidents();
     fetchSettings();
 };
@@ -226,9 +240,11 @@ const onUnlocked = () => {
 const onLogout = () => {
     statusLogout();
     statusToken.value = '';
-    monitors.value = [];
-    incidents.value = [];
-    locked.value = true;
+    // 连持久化快照一起清:私密模式退出后不该还能从 localStorage 读回内容
+    resources.publicMonitors.invalidate();
+    resources.publicIncidents.invalidate();
+    resources.siteSettings.invalidate();
+    forceLocked.value = true;
     window.scrollTo({ top: 0 });
 };
 
@@ -246,7 +262,8 @@ const subscribe = async () => {
             body: JSON.stringify({ email: subEmail.value }),
         });
         subOk.value = r.ok;
-        if (await isStatusLocked(r)) { locked.value = true; return; }
+        // locked 是只读 computed,这里要写的是它背后的手动锁定标志
+        if (await isStatusLocked(r)) { forceLocked.value = true; return; }
         subMsg.value = r.ok ? t('statusPage.subscribed') : t('common.actionFailed');
         if (r.ok) subEmail.value = '';
     } catch {
@@ -257,12 +274,32 @@ const subscribe = async () => {
     }
 };
 
-let _timer;
+// ── 轮询的启停 ──
+// 页面被 keep-alive 缓存后 onUnmounted 不会触发,清理逻辑必须挂到 onDeactivated 上,
+// 否则停在别的页面时这里还在每 30 秒打一次接口。
+// start 做成幂等:首次进入时 onMounted 与 onActivated 会连续触发,不能装两个定时器。
+let _timer = null;
+const startPolling = () => {
+    if (_timer) return;
+    _timer = setInterval(() => { if (!locked.value) loadMonitors(); }, 30000);
+};
+const stopPolling = () => {
+    if (_timer) { clearInterval(_timer); _timer = null; }
+};
+
 onMounted(() => {
-    fetchMonitors();
+    loadMonitors();
     fetchIncidents();
     fetchSettings();
-    _timer = setInterval(() => { if (!locked.value) fetchMonitors(); }, 30000);
+    startPolling();
 });
-onUnmounted(() => clearInterval(_timer));
+// 从别的页面切回来:数据若已过期就静默刷新(不会闪骨架屏)
+onActivated(() => {
+    startPolling();
+    applyBranding();          // 详情页可能改过标题,回列表时要盖回来
+    loadMonitors();
+    fetchIncidents();
+});
+onDeactivated(stopPolling);
+onUnmounted(stopPolling);
 </script>

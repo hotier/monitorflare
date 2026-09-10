@@ -190,15 +190,15 @@
 <script setup>
 import { ref, computed } from 'vue';
 import { useI18n } from 'vue-i18n';
-import { useAuth } from '../../composables/useAuth';
 import { useToast } from '../../composables/useToast';
-import { API_BASE, fetchT } from '../../utils/api';
+import { API_BASE, authFetchT } from '../../utils/api';
 import { setAppLanguage, setAppTimezone } from '../../main';
+// 与状态页、详情页共用同一份站点配置,不再各拉一遍
+import * as resources from '../../composables/resources';
 import AppSelect from '../common/AppSelect.vue';
 
 const { t } = useI18n();
 const emit = defineEmits(['close', 'saved', 'import-done']);
-const { storedToken } = useAuth();
 const { addToast } = useToast();
 
 const sha256Hex = async (value) => {
@@ -242,30 +242,34 @@ const statusPassword = ref('');
 /** 是否已设置过访问密码(GET /settings 会返回哈希),用于区分"必填"与"留空则保持原密码" */
 const hasStatusPassword = ref(false);
 
-const authFetch = async (url, opts = {}) => fetchT(url, { ...opts, headers: { ...opts.headers, 'Authorization': `Bearer ${storedToken.value}` } });
+/** 用资源里的配置填充表单。资源已经加载过时这是同步的,拿不到数据则原样返回 */
+const applyResourceSettings = () => {
+    const d = resources.siteSettings.data.value;
+    if (!d) return;
+    settings.value = {
+        site_title: d.site_title || 'Uptime Monitor',
+        site_description: d.site_description || '',
+        site_logo_url: d.site_logo_url || '',
+        alert_template_down: d.alert_template_down || '',
+        alert_template_up: d.alert_template_up || '',
+        alert_template_error_rate: d.alert_template_error_rate || '',
+        language: d.language || 'zh',
+        timezone: d.timezone || 'Asia/Shanghai',
+        status_page_visibility: d.status_page_visibility === 'private' ? 'private' : 'public',
+    };
+    statusPassword.value = '';
+    hasStatusPassword.value = !!d.status_page_password;
+};
 
 const fetchSettings = async () => {
-    try {
-        const r = await fetchT(`${API_BASE}/settings`);
-        if (r.ok) {
-            const d = await r.json();
-            settings.value = {
-                site_title: d.site_title || 'Uptime Monitor',
-                site_description: d.site_description || '',
-                site_logo_url: d.site_logo_url || '',
-                alert_template_down: d.alert_template_down || '',
-                alert_template_up: d.alert_template_up || '',
-                alert_template_error_rate: d.alert_template_error_rate || '',
-                language: d.language || 'zh',
-                timezone: d.timezone || 'Asia/Shanghai',
-                status_page_visibility: d.status_page_visibility === 'private' ? 'private' : 'public',
-            };
-            statusPassword.value = '';
-            hasStatusPassword.value = !!d.status_page_password;
-        }
-    } catch {
-        addToast(t('settings.loadFailed'), 'error');
-    }
+    const before = resources.siteSettings.updatedAt.value;
+    // 先用缓存把表单填出来,避免每次打开都空着等一次网络往返
+    applyResourceSettings();
+    await resources.siteSettings.ensure();
+    // 只有这次真的发生了重新请求(updatedAt 变了)才覆盖表单 ——
+    // 否则用户刚敲进去的内容会被后台刷新回来的数据冲掉
+    if (resources.siteSettings.updatedAt.value !== before) applyResourceSettings();
+    if (resources.siteSettings.error.value) addToast(t('settings.loadFailed'), 'error');
 };
 
 const save = async () => {
@@ -279,7 +283,7 @@ const save = async () => {
     try {
         const payload = { ...settings.value };
         if (statusPassword.value) payload.status_page_password = await sha256Hex(statusPassword.value);
-        const r = await authFetch(`${API_BASE}/settings`, {
+        const r = await authFetchT(`${API_BASE}/settings`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload),
@@ -314,7 +318,7 @@ const importMonitors = async (e) => {
 
         let ok = 0;
         for (const item of items) {
-            const r = await authFetch(`${API_BASE}/monitors`, {
+            const r = await authFetchT(`${API_BASE}/monitors`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(item),
