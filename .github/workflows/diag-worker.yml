@@ -23,12 +23,21 @@ jobs:
           echo "== deployments =="
           curl -sS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$API/deployments" \
             | jq '{success, errors, result}'
-          echo "== versions =="
+          echo "== versions (raw, first 3000 chars) =="
           curl -sS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$API/versions" \
-            | jq -c '[.result[] | {id, number, created_on}]' || true
+            | jq -c '.' | head -c 3000 || true
+          echo
           echo "== settings (compatibility date / bindings) =="
           curl -sS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$API/settings" \
             | jq '{success, result: {compatibility_date: .result.compatibility_date, compatibility_flags: .result.compatibility_flags, bindings: [.result.bindings[]? | {type, name, namespace_id: .namespace_id, text: .text}]}}'
+          echo "== active deployment script content check =="
+          curl -sS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$API" -o /tmp/script.js
+          wc -c /tmp/script.js
+          echo "-- code markers (which version is live?) --"
+          grep -c 'Unhandled error' /tmp/script.js || echo "marker 'Unhandled error' (onError fix): 0"
+          grep -c 'Starting scheduled check' /tmp/script.js || echo "marker 'Starting scheduled check': 0"
+          grep -c 'Init failed' /tmp/script.js || echo "marker 'Init failed' (harden fix): 0"
+          head -c 500 /tmp/script.js
       - name: tail worker and probe
         run: |
           set -u
