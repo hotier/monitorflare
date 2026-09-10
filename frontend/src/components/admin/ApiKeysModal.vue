@@ -33,12 +33,18 @@
               </button>
             </div>
 
-            <!-- 新建 key 明文展示(仅一次) -->
-            <div v-if="newKey" class="rounded-xl border border-emerald-500/30 bg-emerald-500/5 p-4 space-y-2">
-              <p class="text-xs font-semibold text-emerald-400">{{ $t('apiKeys.keyCreatedOnce') }}</p>
+            <!-- 新建 key 明文展示(仅一次)。
+                 浅色下必须显式给亮色:base.css 覆写了 green/cyan/blue/purple/orange/rose/red 系,
+                 唯独没有 emerald —— 实测 emerald-400 标题 1.8:1、emerald-300 密钥 2.7:1、
+                 复制图标 1.4:1,压在浅底上基本看不见(slate-950/50 只有半透明,合成出来是中灰不是近黑)。
+                 复制按钮还踩了另一条:类名里出现 bg-*-600 就会被
+                 button[class*="bg-"][class*="-600"] 强刷白字,白图标压浅绿底一样看不见,
+                 所以浅色改用 bg-emerald-100,并保证整串类名不含 -600 色阶。 -->
+            <div v-if="newKey" class="rounded-xl border border-emerald-200 bg-emerald-50 p-4 space-y-2 dark:border-emerald-500/30 dark:bg-emerald-500/5">
+              <p class="text-xs font-semibold text-emerald-700 dark:text-emerald-400">{{ $t('apiKeys.keyCreatedOnce') }}</p>
               <div class="flex items-center gap-2">
-                <code class="flex-1 font-mono text-sm text-emerald-300 bg-slate-950/50 rounded-lg px-3 py-2 break-all">{{ newKey }}</code>
-                <button @click="copyNewKey" class="px-3 py-2 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 text-xs font-semibold transition cursor-pointer" :title="$t('apiKeys.copy')">
+                <code class="flex-1 font-mono text-sm text-emerald-800 bg-white border border-emerald-200/70 rounded-lg px-3 py-2 break-all dark:bg-slate-950/50 dark:border-slate-800 dark:text-emerald-300">{{ newKey }}</code>
+                <button @click="copyNewKey" class="px-3 py-2 rounded-lg bg-emerald-100 hover:bg-emerald-200 text-emerald-700 text-xs font-semibold transition cursor-pointer dark:bg-emerald-500/20 dark:hover:bg-emerald-500/30 dark:text-emerald-300" :title="$t('apiKeys.copy')">
                   <i class="fas" :class="copied ? 'fa-check' : 'fa-copy'"></i>
                 </button>
               </div>
@@ -69,12 +75,31 @@
             </div>
           </section>
 
-          <!-- 用法示例 -->
+          <!-- 用法示例(可收起展开) -->
           <section class="space-y-3">
-            <h4 class="text-sm font-semibold text-white">{{ $t('apiKeys.usageTitle') }}</h4>
+            <!-- 按钮嵌在 h4 内:既是小标题,又能整行点击切换(ARIA disclosure 模式) -->
+            <h4 class="text-sm font-semibold text-white">
+              <button type="button" @click="usageOpen = !usageOpen"
+                class="group flex w-full items-center justify-between gap-2 cursor-pointer"
+                :aria-expanded="usageOpen" aria-controls="api-keys-usage"
+                :title="usageOpen ? $t('apiKeys.usageCollapse') : $t('apiKeys.usageExpand')">
+                <span>{{ $t('apiKeys.usageTitle') }}</span>
+                <i class="fas fa-chevron-down text-[10px] text-slate-500 transition-transform duration-200"
+                  :class="{ 'rotate-180': usageOpen }" aria-hidden="true"></i>
+              </button>
+            </h4>
             <p class="text-xs text-slate-500">{{ $t('apiKeys.usageHint') }}</p>
-            <div class="rounded-xl bg-slate-950/60 border border-slate-800 p-4 overflow-x-auto">
-              <pre class="text-[11px] font-mono text-slate-300 leading-relaxed">{{ usageExample }}</pre>
+            <!-- 0fr ↔ 1fr 过渡:不需要 JS 量高度;收起时 aria-hidden 把它移出无障碍树 -->
+            <div id="api-keys-usage" class="grid transition-all duration-300 ease-out"
+              :class="usageOpen ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0'"
+              :aria-hidden="!usageOpen">
+              <div class="overflow-hidden">
+                <!-- 浅色模式要显式给出亮底:base.css 只覆写了 bg-slate-900/800,这里的 slate-950 不在其中,
+                     但 text-slate-300 会被覆写成 #475569 —— 深灰字压近黑底,等于看不清 -->
+                <div class="rounded-xl bg-slate-100 border border-slate-200 dark:bg-slate-950/60 dark:border-slate-800 p-4 overflow-x-auto">
+                  <pre class="text-[11px] font-mono text-slate-700 dark:text-slate-300 leading-relaxed">{{ usageExample }}</pre>
+                </div>
+              </div>
             </div>
           </section>
         </div>
@@ -88,6 +113,7 @@ import { ref, computed, onMounted } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useAuth } from '../../composables/useAuth';
 import { useToast } from '../../composables/useToast';
+import { useConfirm } from '../../composables/useConfirm';
 import { API_BASE, fetchT } from '../../utils/api';
 import { formatDate } from '../../utils/format';
 
@@ -95,6 +121,7 @@ const { t } = useI18n();
 const emit = defineEmits(['close']);
 const { storedToken } = useAuth();
 const { addToast } = useToast();
+const { confirmDialog } = useConfirm();
 
 const keys = ref([]);
 const newKeyName = ref('');
@@ -102,6 +129,8 @@ const newKey = ref('');
 const creating = ref(false);
 const deletingId = ref(null);
 const copied = ref(false);
+// 用法示例默认收起(想默认展开改成 ref(true) 即可)
+const usageOpen = ref(false);
 
 const authFetch = async (url, opts = {}) => fetchT(url, { ...opts, headers: { ...opts.headers, 'Authorization': `Bearer ${storedToken.value}` } });
 
@@ -171,6 +200,8 @@ const copyNewKey = async () => {
 
 const deleteKey = async (k) => {
     if (deletingId.value) return;
+    const ok = await confirmDialog(t('apiKeys.deleteConfirm', { name: k.name }));
+    if (!ok) return;
     deletingId.value = k.id;
     try {
         const r = await authFetch(`${API_BASE}/api-keys/${k.id}`, { method: 'DELETE' });

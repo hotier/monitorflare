@@ -169,8 +169,8 @@ src/
 │       ├── UptimeBar.vue
 │       └── ...
 ├── composables/         # useAuth / useTheme / useToast
-├── locales/             # 9 种语言，每份约 679 行
-│   └── en|zh|zh-tw|ja|ko|de|fr|it|es.json
+├── locales/             # 2 种语言（中英文）
+│   └── en|zh.json
 ├── styles/base.css      # 全局样式（352 行，含浅色模式 hack）
 └── utils/
     ├── api.js           # fetch 封装（超时/重试/Bearer 注入/状态页锁定判断）
@@ -396,7 +396,7 @@ export async function ensureInitialized(env: Bindings): Promise<boolean> {
 | | 前端 | 后端 |
 |---|---|---|
 | 文件 | `frontend/src/locales/*.json` | `worker/src/i18n.ts` |
-| 语言数 | 9（en/zh/zh-tw/ja/ko/de/fr/it/es） | 9（同） |
+| 语言数 | 2（en/zh） | 2（同） |
 | 用途 | 界面文案 | **告警消息**（邮件/IM 推送内容） |
 | 入口 | `vue-i18n` 的 `$t()` | `buildAlertMessage(monitor, type, detail, time, lang)` |
 
@@ -646,7 +646,7 @@ export type ChannelType =
 
 1. 在 `frontend/src/views/` 新建 `.vue`
 2. 在 `frontend/src/router/index.js` 注册路由（当前 5 条，全部懒加载）
-3. 文案加到 `frontend/src/locales/*.json`，**9 个文件都要加**
+3. 文案加到 `frontend/src/locales/*.json`，**en/zh 两个文件都要加**
 4. 如果页面需要新 API，按 §5.5 在后端加接口
 
 > 生产环境是 SPA，`public/_worker.js:63-66` 已实现 404 fallback 到 `index.html`，新路由无需额外配置。
@@ -748,7 +748,7 @@ worker/src/
 | 3 | **双前缀注册遗漏** | 线上 404（本地正常） | 新增/搬迁路由后逐一核对 §4.1 的三类例外 |
 | 4 | **DB 迁移只改 `schema.sql`** | 线上老库缺列，运行时报错 | 必须同时改 `init.ts` 的 `INIT_STATEMENTS` 和 `ensureColumn()` |
 | 5 | **浅色模式 `!important` hack** | 改任何组件配色都可能破坏浅色模式 | 本次不改配色，风险不触发；如后续要改，先按 §5.2 做 token 化再拆 hack |
-| 6 | **双 i18n 体系** | 只改一边导致告警消息或界面文案缺失 | 新增文案时同步 `locales/*.json`（9 个）与 `i18n.ts` |
+| 6 | **双 i18n 体系** | 只改一边导致告警消息或界面文案缺失 | 新增文案时同步 `locales/*.json`（en/zh 两个）与 `i18n.ts` |
 | 7 | **`ADMIN_API_KEY` 写在 `wrangler.toml`** | 敏感信息进版本库 | 部署时改用 `wrangler secret put ADMIN_API_KEY` |
 | 8 | **上游域名残留** | 品牌不一致；`index.html` 的 canonical 指向他人站点（SEO / 正确性问题） | 本次只改 `canonical` 一处；完整清理清单见 §5.1 |
 | 9 | **客户端存储 key 前缀变更** | 老用户语言/时区/主题偏好与登录态重置 | 一次性成本，可接受；如需兼容可在启动时做一次迁移读取 |

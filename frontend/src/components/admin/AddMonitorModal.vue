@@ -46,9 +46,7 @@
             <div v-if="newMonitor.type === 'dns'" class="grid grid-cols-1 sm:grid-cols-2 gap-5 mt-4">
               <div>
                 <label class="block text-sm font-medium text-slate-300 mb-2">{{ $t('monitorForm.dnsRecordType') }}</label>
-                <select v-model="newMonitor.record_type" class="input-field w-full border border-slate-700 rounded-xl px-4 py-3 text-sm bg-slate-800/80 text-white outline-none">
-                  <option value="A">A</option><option value="AAAA">AAAA</option><option value="CNAME">CNAME</option><option value="MX">MX</option><option value="TXT">TXT</option><option value="NS">NS</option>
-                </select>
+                <AppSelect v-model="newMonitor.record_type" :options="dnsRecordTypes" />
               </div>
               <div>
                 <label class="block text-sm font-medium text-slate-300 mb-2">{{ $t('monitorForm.dnsExpected') }}</label>
@@ -80,9 +78,7 @@
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-5">
               <div>
                 <label class="block text-sm font-medium text-slate-300 mb-2">{{ $t('monitorForm.method') }}</label>
-                <select v-model="newMonitor.method" class="input-field w-full border border-slate-700 rounded-xl px-4 py-3 text-sm bg-slate-800/80 text-white outline-none">
-                  <option value="GET">GET</option><option value="POST">POST</option><option value="HEAD">HEAD</option><option value="PUT">PUT</option>
-                </select>
+                <AppSelect v-model="newMonitor.method" :options="httpMethods" />
               </div>
               <div>
                 <label class="block text-sm font-medium text-slate-300 mb-2">{{ $t('monitorForm.keyword') }} <span class="text-xs font-normal text-slate-500">{{ $t('common.optional') }}</span></label>
@@ -149,8 +145,13 @@
 </template>
 
 <script setup>
+import AppSelect from '../common/AppSelect.vue';
+
 defineProps({ newMonitor: Object, submitting: Boolean });
 defineEmits(['close', 'submit']);
+
+const dnsRecordTypes = ['A', 'AAAA', 'CNAME', 'MX', 'TXT', 'NS'].map(v => ({ value: v, label: v }));
+const httpMethods = ['GET', 'POST', 'HEAD', 'PUT'].map(v => ({ value: v, label: v }));
 
 const monitorTypes = [
     { value: 'http', labelKey: 'monitorForm.typeHttp', descKey: 'monitorForm.typeHttpDesc' },

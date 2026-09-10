@@ -5,9 +5,9 @@
   "description": "MonitorFlare monitoring engine (Cloudflare Worker)",
   "scripts": {
     "deploy": "wrangler deploy",
-    "dev": "wrangler dev --ip 0.0.0.0",
+    "dev": "cross-env WRANGLER_SEND_METRICS=false wrangler dev --ip 0.0.0.0",
     "dev:remote": "wrangler dev --remote --ip 0.0.0.0",
-    "start": "wrangler dev --ip 0.0.0.0",
+    "start": "cross-env WRANGLER_SEND_METRICS=false wrangler dev --ip 0.0.0.0",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest"
@@ -15,6 +15,7 @@
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.22.0",
     "@cloudflare/workers-types": "^4.20260607.1",
+    "cross-env": "^7.0.3",
     "typescript": "^6.0.3",
     "vitest": "^4.1.11",
     "wrangler": "^4.98.0"

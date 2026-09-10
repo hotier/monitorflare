@@ -216,11 +216,7 @@
                     </div>
                     <div>
                       <label class="block text-xs font-semibold text-slate-400 mb-2">{{ $t('channels.method') }}</label>
-                      <select v-model="editing.config.method" class="input-field w-full border border-slate-700 rounded-xl px-4 py-3 text-sm bg-slate-800/80 text-white outline-none font-mono">
-                        <option value="POST">POST</option>
-                        <option value="PUT">PUT</option>
-                        <option value="PATCH">PATCH</option>
-                      </select>
+                      <AppSelect v-model="editing.config.method" :options="webhookMethods" />
                     </div>
                     <div>
                       <label class="block text-xs font-semibold text-slate-400 mb-2">{{ $t('channels.headers') }}</label>
@@ -231,9 +227,7 @@
                   <template v-if="editing.type === 'email'">
                     <div>
                       <label class="block text-xs font-semibold text-slate-400 mb-2">{{ $t('channels.emailProvider') }}</label>
-                      <select v-model="editing.config.provider" class="input-field w-full border border-slate-700 rounded-xl px-4 py-3 text-sm bg-slate-800/80 text-white outline-none font-mono">
-                        <option v-for="p in emailProviders" :key="p.value" :value="p.value">{{ p.label }}</option>
-                      </select>
+                      <AppSelect v-model="editing.config.provider" :options="emailProviders" />
                     </div>
                     <div>
                       <label class="block text-xs font-semibold text-slate-400 mb-2">{{ $t('channels.apiKey') }}</label>
@@ -316,12 +310,15 @@ import { computed, ref } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useAuth } from '../../composables/useAuth';
 import { useToast } from '../../composables/useToast';
+import { useConfirm } from '../../composables/useConfirm';
 import { API_BASE, fetchT } from '../../utils/api';
+import AppSelect from '../common/AppSelect.vue';
 
 const { t } = useI18n();
 defineEmits(['close']);
 const { storedToken } = useAuth();
 const { addToast } = useToast();
+const { confirmDialog } = useConfirm();
 
 const channels = ref([]);
 const channelsLoading = ref(false);
@@ -331,6 +328,8 @@ const saving = ref(false);
 const testingId = ref(null);
 const togglingId = ref(null);
 const deletingId = ref(null);
+
+const webhookMethods = ['POST', 'PUT', 'PATCH'].map(v => ({ value: v, label: v }));
 
 const emailProviders = [
     { value: 'resend', label: 'Resend' },
@@ -394,9 +393,24 @@ const selectType = (type) => {
     editing.value = { type, name: editing.value.name, config: baseConfig(type) };
 };
 
+// 各渠道类型必填的配置字段(仅新建时强制,编辑时留空表示保留原密钥)
+const REQUIRED_CONFIG = {
+    dingtalk: ['access_token'],
+    wecom: ['key'],
+    feishu: ['webhook_url'],
+    telegram: ['bot_token', 'chat_id'],
+    webhook: ['url'],
+    email: ['api_key', 'from_email', 'to_email'],
+    slack: ['webhook_url'],
+    discord: ['webhook_url'],
+    ntfy: ['server', 'topic'],
+};
+
 const saveCh = async () => {
     const ch = editing.value;
     if (!ch.name || !ch.type) { addToast(t('channels.fillName'), 'error'); return; }
+    const missing = (REQUIRED_CONFIG[ch.type] || []).filter(k => !(ch.config?.[k] || '').trim());
+    if (!ch.id && missing.length) { addToast(t('channels.fillConfig'), 'error'); return; }
     saving.value = true;
     try {
         const url = ch.id ? `${API_BASE}/notification-channels/${ch.id}` : `${API_BASE}/notification-channels`;
@@ -433,7 +447,8 @@ const editCh = (ch) => {
 };
 
 const deleteCh = async (ch) => {
-    if (!confirm(t('channels.deleteConfirm', { name: ch.name }))) return;
+    const ok = await confirmDialog(t('channels.deleteConfirm', { name: ch.name }));
+    if (!ok) return;
     deletingId.value = ch.id;
     try {
         const res = await authFetch(`${API_BASE}/notification-channels/${ch.id}`, { method: 'DELETE' });

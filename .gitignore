@@ -31,6 +31,9 @@ worker/dist/
 posts/
 design-system/
 
+# Local tool cache (contains machine-specific absolute paths)
+.v2c/
+
 # IDE
 .idea/
 

@@ -211,3 +211,43 @@ describe('邮件订阅', () => {
     expect(row?.n).toBe(1);
   });
 });
+
+describe('批量操作', () => {
+  const batch = (payload: unknown): RequestInit => ({
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer test-admin-key' },
+    body: JSON.stringify(payload),
+  });
+
+  it('ids 为空返回 400', async () => {
+    const res = await call('/monitors/batch', batch({ action: 'check', ids: [] }));
+    expect(res.status).toBe(400);
+  });
+
+  it('未知 action 返回 400', async () => {
+    const res = await call('/monitors/batch', batch({ action: 'nope', ids: [1] }));
+    expect(res.status).toBe(400);
+  });
+
+  it('action=check 返回实际命中数量', async () => {
+    const res = await call('/monitors/batch', batch({ action: 'check', ids: [999999] }));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ success: true, affected: 0 });
+  });
+
+  it('批量暂停/恢复/删除生效', async () => {
+    const inserted = await env.DB.prepare(
+      "INSERT INTO monitors (name, url, type, status, paused, sort_order) VALUES ('batch-monitor', 'https://example.com', 'http', 'UP', 0, 0)"
+    ).run();
+    const id = Number(inserted.meta.last_row_id);
+
+    await call('/monitors/batch', batch({ action: 'pause', ids: [id] }));
+    expect((await env.DB.prepare('SELECT paused FROM monitors WHERE id = ?').bind(id).first<{ paused: number }>())?.paused).toBe(1);
+
+    await call('/monitors/batch', batch({ action: 'resume', ids: [id] }));
+    expect((await env.DB.prepare('SELECT paused FROM monitors WHERE id = ?').bind(id).first<{ paused: number }>())?.paused).toBe(0);
+
+    await call('/monitors/batch', batch({ action: 'delete', ids: [id] }));
+    expect(await env.DB.prepare('SELECT id FROM monitors WHERE id = ?').bind(id).first()).toBeNull();
+  });
+});

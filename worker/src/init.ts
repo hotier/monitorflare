@@ -80,12 +80,12 @@ const INIT_STATEMENTS: string[] = [
   `CREATE INDEX IF NOT EXISTS idx_incidents_active ON incidents(type, status, scheduled_start, scheduled_end)`,
 ];
 
-const DEFAULT_SETTINGS: Record<string, string> = {
+export const DEFAULT_SETTINGS: Record<string, string> = {
   site_title: 'MonitorFlare',
   site_description: 'Realtime monitoring & status page',
   site_logo_url: '/logo.svg',
-  language: 'en',
-  timezone: 'UTC',
+  language: 'zh',
+  timezone: 'Asia/Shanghai',
   theme: 'dark',
   status_page_feed: '1',
   status_page_visibility: 'public',

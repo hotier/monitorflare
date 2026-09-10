@@ -55,14 +55,13 @@
           <div class="flex items-center gap-3">
             <div class="w-1 h-5 rounded-full bg-emerald-500"></div>
             <h2 class="text-sm font-bold text-slate-600 dark:text-slate-400">{{ $t('statusPage.serviceStatus') }}</h2>
+            <span v-if="lastUpdated" class="text-[11px] font-mono text-slate-400 dark:text-slate-500">{{ lastUpdated }}</span>
           </div>
           <div class="flex items-center gap-3 text-[11px] font-mono text-slate-500 dark:text-slate-600">
             <span class="flex items-center gap-1.5">
               <span class="w-1.5 h-1.5 rounded-full bg-emerald-500/50"></span>
               {{ $t('statusPage.activeMonitors', { count: activeMonitors.length }) }}
             </span>
-            <span v-if="lastUpdated" class="text-slate-400 dark:text-slate-500">·</span>
-            <span v-if="lastUpdated" class="text-slate-400 dark:text-slate-500">{{ lastUpdated }}</span>
           </div>
         </div>
 
@@ -92,7 +91,7 @@
           </div>
           <form class="flex w-full sm:w-auto gap-2" @submit.prevent="subscribe">
             <input v-model="subEmail" type="email" :placeholder="$t('statusPage.emailPlaceholder')"
-              class="flex-1 sm:w-64 rounded-xl border border-slate-200 dark:border-white/10 bg-white dark:bg-slate-900/60 px-4 py-2.5 text-sm text-slate-800 dark:text-white outline-none focus:border-emerald-500/60 placeholder-slate-400 dark:placeholder-slate-600">
+              class="flex-1 sm:w-64 rounded-xl border border-slate-200 dark:border-white/10 bg-white dark:bg-slate-900/60 px-4 py-3 text-xs font-mono text-slate-800 dark:text-white outline-none focus:border-emerald-500/60 placeholder-slate-400 dark:placeholder-slate-600">
             <button type="submit" :disabled="subscribing"
               class="rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold px-5 py-2.5 transition-colors disabled:opacity-60 cursor-pointer">
               <i class="fas" :class="subscribing ? 'fa-circle-notch fa-spin' : 'fa-paper-plane'"></i>
@@ -118,8 +117,7 @@ import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useTheme } from '../composables/useTheme';
 import { API_BASE, fetchT, withRetry, isStatusLocked, statusLogout, STATUS_TOKEN_KEY } from '../utils/api';
-import { formatDate } from '../utils/format';
-import { getAppTimezone } from '../main';
+import { formatDate, formatNow } from '../utils/format';
 
 import StatusHeader from '../components/status/StatusHeader.vue';
 import HeroBanner from '../components/status/HeroBanner.vue';
@@ -176,7 +174,7 @@ const fetchMonitors = async () => {
         if (res.ok) {
             const data = await res.json();
             monitors.value = data.monitors || [];
-            lastUpdated.value = new Date().toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZone: getAppTimezone() });
+            lastUpdated.value = formatNow();
         } else {
             let errorMsg = t('statusPage.serverError', { status: res.status });
             try { const d = await res.json(); if (d?.error) errorMsg = t('statusPage.apiError', { error: d.error }); } catch {}

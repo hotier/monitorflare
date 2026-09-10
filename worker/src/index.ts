@@ -9,7 +9,7 @@ import type { Bindings, CheckResult, Incident, Monitor, NotificationChannel, Sub
 import { performCheck, updateDomainCertInfo, normalizeMonitorUrl } from './checks';
 import { sendToChannel, CHANNEL_TYPES, EMAIL_PROVIDERS } from './channels';
 import { buildAlertMessage, isSupportedLang, type Lang } from './i18n';
-import { ensureInitialized, getSetting, getSettingsMap } from './init';
+import { ensureInitialized, getSetting, getSettingsMap, DEFAULT_SETTINGS } from './init';
 import {
   createSessionToken, createOAuthState, verifyOAuthState, verifySessionToken,
   verifyAdminCredential, verifyMagicLinkToken, createMagicLinkToken,
@@ -272,7 +272,7 @@ app.get('/monitors/public', async (c) => {
 app.get('/monitors/public/details', async (c) => {
   try {
     const { results: monitors } = await c.env.DB.prepare(
-      'SELECT id, name, url, type, status, last_check, cert_expiry, domain_expiry, paused, tags, check_ssl FROM monitors ORDER BY sort_order ASC, created_at ASC'
+      'SELECT id, name, url, type, status, last_check, cert_expiry, domain_expiry, paused, tags, check_ssl, created_at FROM monitors ORDER BY sort_order ASC, created_at ASC'
     ).all();
     if (!monitors || monitors.length === 0) return c.json({ monitors: [] });
 
@@ -309,13 +309,27 @@ app.get('/monitors/public/details', async (c) => {
     const { results: latRows } = await c.env.DB.prepare(
       'SELECT monitor_id, latency FROM logs WHERE is_fail=0 ORDER BY created_at DESC LIMIT 200'
     ).all();
+    // 当天数据在 daily_uptime 里要么缺失,要么只是聚合时刻(UTC 02:00)的陈旧快照 → 从 logs 实时重算
+    const { results: todayRows } = await c.env.DB.prepare(`
+      SELECT monitor_id, COUNT(*) as t, SUM(CASE WHEN is_fail=0 THEN 1 ELSE 0 END) as s
+      FROM logs WHERE created_at >= date('now') GROUP BY monitor_id
+    `).all();
 
     type DS = { date: string; up: number; total: number };
+    const todayDate = new Date().toISOString().slice(0, 10);
     const dMap = new Map<number, DS[]>();
     for (const r of dailyRows || []) {
+      if (r.date === todayDate) continue;
       const id = r.monitor_id as number;
       if (!dMap.has(id)) dMap.set(id, []);
       dMap.get(id)!.push({ date: r.date as string, up: r.successful_checks as number, total: r.total_checks as number });
+    }
+    for (const r of todayRows || []) {
+      const total = Number(r.t) || 0;
+      if (total <= 0) continue;
+      const id = r.monitor_id as number;
+      if (!dMap.has(id)) dMap.set(id, []);
+      dMap.get(id)!.push({ date: todayDate, up: Number(r.s) || 0, total });
     }
     const sMap = new Map<number, Record<string, number>>();
     for (const r of liveRows || []) sMap.set(r.monitor_id as number, r as Record<string, number>);
@@ -424,6 +438,14 @@ app.get('/monitors/public/:id', async (c) => {
       return inc.affected_monitors.split(',').map(x => x.trim()).filter(Boolean).includes(String(id));
     });
 
+    // 当天数据在 daily_uptime 里要么缺失,要么只是聚合时刻(UTC 02:00)的陈旧快照 → 从 logs 实时重算
+    const todayDate = new Date().toISOString().slice(0, 10);
+    const todayTotal = (today?.t as number) || 0;
+    const dailyStats = (dailyRows || [])
+      .filter(r => r.date !== todayDate)
+      .map(r => ({ date: r.date as string, up: r.successful_checks as number, total: r.total_checks as number }));
+    if (todayTotal > 0) dailyStats.push({ date: todayDate, up: (today?.s as number) || 0, total: todayTotal });
+
     const enriched = {
       ...monitor,
       latency: latencySeries.length > 0 ? latencySeries[latencySeries.length - 1].latency : null,
@@ -431,7 +453,7 @@ app.get('/monitors/public/:id', async (c) => {
       uptime_7d: pct(upt?.t7 as number, upt?.s7 as number),
       uptime_30d: pct(upt?.t30 as number, upt?.s30 as number),
       uptime_90d: pct(t90, s90),
-      daily_stats: (dailyRows || []).map(r => ({ date: r.date as string, up: r.successful_checks as number, total: r.total_checks as number })),
+      daily_stats: dailyStats,
     };
 
     return c.json({ monitor: enriched, logs: logs || [], latency_series: latencySeries, incidents });
@@ -443,21 +465,44 @@ app.get('/monitors/public/:id', async (c) => {
 app.post('/monitors', async (c) => {
   try {
     const body = await c.req.json<Partial<Monitor>>();
-    const { name, interval, keyword, user_agent, tags, request_headers, request_body } = body;
+    const { name, keyword, user_agent, tags, request_headers, request_body } = body;
     if (!name || !body.url) return c.json({ error: 'Missing name or url' }, 400);
     const url = normalizeMonitorUrl(body.url);
     const type = (['dns', 'port'].includes(body.type || '') ? body.type : 'http') as Monitor['type'];
+    // URL 基础格式校验:http 用 URL 解析,dns/port 只挡空白字符
+    if (type === 'http') {
+      try { new URL(url); } catch { return c.json({ error: 'Invalid url' }, 400); }
+    } else if (/\s/.test(url)) {
+      return c.json({ error: 'Invalid url' }, 400);
+    }
     const method = (body.method || 'GET').toUpperCase();
     const config = body.config || null;
+    // 端口监控:port 必须为 1-65535 的整数
+    if (type === 'port') {
+      let port: unknown = null;
+      try { port = typeof config === 'string' ? JSON.parse(config).port : (config as Record<string, unknown>)?.port; } catch { /* ignore */ }
+      const portNum = Number(port);
+      if (!Number.isInteger(portNum) || portNum < 1 || portNum > 65535) {
+        return c.json({ error: 'Invalid port (must be 1-65535)' }, 400);
+      }
+    }
     const alertAfterFailures = Number(body.alert_after_failures) > 0 ? Number(body.alert_after_failures) : 1;
+    // 检测频率 clamp 到 [60, 86400] 秒,防止 0/负值造成轮询风暴
+    const intervalClamped = Math.min(Math.max(Math.round(Number(body.interval) || 300), 60), 86400);
+    const checkSsl = body.check_ssl === 0 ? 0 : 1;
+    const checkDomain = body.check_domain === 0 ? 0 : 1;
+    const alertErrorRate = Math.min(Math.max(Number(body.alert_error_rate) || 0, 0), 100);
+    const legacy = body as Record<string, unknown>;
+    const alertSilenceUptime = Math.min(Math.max(Number(body.alert_silence_uptime ?? legacy.alert_silence_hours) || 24, 1), 720);
 
     const result = await c.env.DB.prepare(
-      `INSERT INTO monitors (name, url, type, config, method, interval, keyword, user_agent, tags, request_headers, request_body, alert_after_failures)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO monitors (name, url, type, config, method, interval, keyword, user_agent, tags, request_headers, request_body, alert_after_failures, check_ssl, check_domain, alert_error_rate, alert_silence_uptime)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).bind(
       name, url, type, config, method,
-      interval || 300, keyword || null, user_agent || null, tags || null,
-      request_headers || null, request_body || null, alertAfterFailures
+      intervalClamped, keyword || null, user_agent || null, tags || null,
+      request_headers || null, request_body || null, alertAfterFailures,
+      checkSsl, checkDomain, alertErrorRate, alertSilenceUptime
     ).run();
 
     const newId = result.meta.last_row_id as number;
@@ -504,9 +549,34 @@ app.patch('/monitors/:id/config', async (c) => {
       ['alert_silence_domain', 'alert_silence_domain'], ['alert_error_rate', 'alert_error_rate'],
       ['alert_after_failures', 'alert_after_failures'], ['paused', 'paused'],
     ];
+    // 数值字段范围钳制,防止 0/负值造成轮询风暴等异常行为
+    const NUMERIC_CLAMP: Partial<Record<keyof Monitor, [number, number]>> = {
+      interval: [60, 86400],
+      alert_silence_uptime: [1, 720],
+      alert_silence_ssl: [1, 720],
+      alert_silence_domain: [1, 720],
+      alert_error_rate: [0, 100],
+      alert_after_failures: [1, 100],
+    };
+    const VALID_METHODS = ['GET', 'POST', 'HEAD', 'PUT'];
     for (const [dbField, key] of simpleMap) {
       const v = body[key];
-      if (v !== undefined && v !== null) { fields.push(`${dbField} = ?`); values.push(v); }
+      if (v === undefined || v === null) continue;
+      // name/url 不允许清空为空字符串
+      if ((key === 'name' || key === 'url') && String(v).trim() === '') continue;
+      let out: unknown = v;
+      const range = NUMERIC_CLAMP[key];
+      if (range) {
+        const n = Math.round(Number(v));
+        if (!Number.isFinite(n)) continue;
+        out = Math.min(Math.max(n, range[0]), range[1]);
+      }
+      if (key === 'method') {
+        if (!VALID_METHODS.includes(String(v).toUpperCase())) continue;
+        out = String(v).toUpperCase();
+      }
+      fields.push(`${dbField} = ?`);
+      values.push(out);
     }
     if (body.type !== undefined && ['http', 'dns', 'port'].includes(body.type)) {
       fields.push('type = ?'); values.push(body.type);
@@ -596,7 +666,7 @@ app.get('/monitors/:id/stats', async (c) => {
 
 app.post('/monitors/batch', async (c) => {
   try {
-    const body = await c.req.json<{ ids: number[]; action: 'pause' | 'resume' | 'delete' }>();
+    const body = await c.req.json<{ ids: number[]; action: 'pause' | 'resume' | 'delete' | 'check' }>();
     if (!Array.isArray(body.ids) || body.ids.length === 0) return c.json({ error: 'ids is required' }, 400);
     const placeholders = body.ids.map(() => '?').join(',');
     if (body.action === 'delete') {
@@ -606,6 +676,12 @@ app.post('/monitors/batch', async (c) => {
       const paused = body.action === 'pause' ? 1 : 0;
       await c.env.DB.prepare(`UPDATE monitors SET paused = ?, status = ? WHERE id IN (${placeholders})`)
         .bind(paused, paused ? 'PAUSED' : 'UP', ...body.ids).run();
+    } else if (body.action === 'check') {
+      // 批量刷新: 对选中的监控并发执行一次真实检测
+      const { results } = await c.env.DB.prepare(`SELECT ${MONITOR_COLUMNS} FROM monitors WHERE id IN (${placeholders})`)
+        .bind(...body.ids).all<Monitor>();
+      await Promise.all(results.map((monitor) => performMonitorCheck(monitor, c.env)));
+      return c.json({ success: true, affected: results.length });
     } else {
       return c.json({ error: 'Invalid action' }, 400);
     }
@@ -723,9 +799,13 @@ app.get('/settings', async (c) => {
 app.put('/settings', async (c) => {
   try {
     const body = await c.req.json<Record<string, string>>();
+    // 白名单:只允许写入已知设置键
+    const allowed = new Set(Object.keys(DEFAULT_SETTINGS));
+    const entries = Object.entries(body).filter(([k]) => allowed.has(k));
+    if (entries.length === 0) return c.json({ error: 'No valid setting keys' }, 400);
     const stmt = c.env.DB.prepare('INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at');
     const now = new Date().toISOString();
-    await c.env.DB.batch(Object.entries(body).map(([k, v]) => stmt.bind(k, String(v), now)));
+    await c.env.DB.batch(entries.map(([k, v]) => stmt.bind(k, String(v), now)));
     return c.json({ success: true });
   } catch (e: unknown) {
     return c.json({ error: e instanceof Error ? e.message : 'Unknown error' }, 500);
@@ -818,7 +898,7 @@ app.post('/notification-channels/:id/test', async (c) => {
     const channel = await c.env.DB.prepare('SELECT * FROM notification_channels WHERE id = ?').bind(id).first<NotificationChannel>();
     if (!channel) return c.json({ error: 'Channel not found' }, 404);
     const lang = isSupportedLang(await getSetting(c.env, 'language'));
-    const tz = await getSetting(c.env, 'timezone') || 'UTC';
+    const tz = await getSetting(c.env, 'timezone') || 'Asia/Shanghai';
     const msg = buildAlertMessage(
       { name: 'Test Monitor', url: 'https://example.com' }, 'DOWN',
       'This is a test message to verify your notification channel.', formatTimeInTz(new Date(), tz), lang,
@@ -833,7 +913,7 @@ app.post('/notification-channels/:id/test', async (c) => {
 app.post('/test-alert', async (c) => {
   try {
     const lang = isSupportedLang(await getSetting(c.env, 'language'));
-    const tz = await getSetting(c.env, 'timezone') || 'UTC';
+    const tz = await getSetting(c.env, 'timezone') || 'Asia/Shanghai';
     const msg = buildAlertMessage(
       { name: 'Test Monitor', url: 'https://example.com' }, 'DOWN',
       'This is a test message to verify your notification channels.', formatTimeInTz(new Date(), tz), lang,
@@ -1278,7 +1358,7 @@ async function performMonitorCheck(monitor: Monitor, env: Bindings) {
   // 状态机: 连续失败计数 → 告警
   const afterFailures = Math.max(1, monitor.alert_after_failures || 1);
   const lang = isSupportedLang(await getSetting(env, 'language'));
-  const tz = await getSetting(env, 'timezone') || 'UTC';
+  const tz = await getSetting(env, 'timezone') || 'Asia/Shanghai';
 
   if (!result.ok) {
     const newRetry = (monitor.retry_count || 0) + 1;
@@ -1363,7 +1443,7 @@ async function sendAlertToAllChannels(env: Bindings, msg: ReturnType<typeof buil
 // 证书 / 域名到期告警(每 2 小时)
 async function checkExpiryAlerts(env: Bindings) {
   const lang = isSupportedLang(await getSetting(env, 'language'));
-  const tz = await getSetting(env, 'timezone') || 'UTC';
+  const tz = await getSetting(env, 'timezone') || 'Asia/Shanghai';
   const { results } = await env.DB.prepare(`
     SELECT ${MONITOR_COLUMNS} FROM monitors WHERE paused = 0 AND type = 'http' AND (check_ssl = 1 OR check_domain = 1)
   `).all<Monitor>();

@@ -25,6 +25,7 @@
     "addFailed": "添加失败",
     "configSaved": "配置已保存",
     "deleteConfirm": "确定要删除「{name}」吗?",
+    "logoutConfirm": "确定要退出登录吗?",
     "saving": "保存中...",
     "all": "全部",
     "none": "无",
@@ -35,6 +36,15 @@
     "uptime": "可用率",
     "actions": "操作",
     "type": "类型"
+  },
+  "dateTimePicker": {
+    "placeholder": "选择日期和时间",
+    "startPlaceholder": "开始日期",
+    "endPlaceholder": "结束日期",
+    "time": "时间",
+    "today": "今天",
+    "now": "现在",
+    "ok": "确定"
   },
   "statusPage": {
     "serviceStatus": "服务状态",
@@ -101,9 +111,8 @@
   },
   "uptimeBar": {
     "noData": "无数据",
-    "daysAgo": "90 天前",
-    "last30d": "近30天: {pct}%",
-    "yesterday": "昨天"
+    "daysAgo": "{days} 天前",
+    "today": "今天"
   },
   "footer": {
     "refresh": "刷新数据",
@@ -116,12 +125,9 @@
   },
   "login": {
     "title": "管理后台",
-    "subtitle": "输入管理员密码访问监控配置",
     "passwordPlaceholder": "请输入管理员密码",
     "verifying": "正在验证",
     "enter": "进入后台",
-    "protectedArea": "受保护区域",
-    "sessionLogin": "当前会话登录",
     "backToStatus": "返回状态页",
     "notConfigured": "后台未配置管理口令",
     "wrongPassword": "密码不正确",
@@ -155,6 +161,7 @@
     "addFirstMonitor": "添加第一个监控",
     "loadFailed": "数据加载失败 ({status})",
     "fillNameUrl": "请填写名称和 URL",
+    "invalidPort": "端口需为 1-65535 之间的整数",
     "monitorAdded": "监控添加成功",
     "deleted": "已删除: {name}",
     "updated": "已更新: {name}",
@@ -163,6 +170,7 @@
     "saved": "配置已保存",
     "batchConfirm": "确定批量删除 {count} 个监控?",
     "batchSuccess": "操作成功,影响 {count} 项",
+    "batchRefreshed": "已刷新 {count} 个监控",
     "batchFailed": "批量操作失败",
     "orderSaved": "排序已保存",
     "orderSaveFailed": "排序保存失败",
@@ -180,6 +188,7 @@
     "bulkPause": "暂停",
     "bulkResume": "恢复",
     "bulkDelete": "删除",
+    "bulkRefresh": "刷新",
     "apiKeys": "API 密钥",
     "backup": "备份",
     "restore": "恢复",
@@ -260,6 +269,7 @@
     "unknownChannel": "未知渠道",
     "customChannel": "自定义通知渠道",
     "fillName": "请填写渠道名称",
+    "fillConfig": "请填写该渠道类型的必填配置项",
     "updated": "渠道已更新",
     "added": "渠道已添加",
     "operationFailed": "操作失败",
@@ -445,7 +455,6 @@
   },
   "settings": {
     "title": "站点设置",
-    "subtitle": "品牌、语言、时区与主题",
     "siteTitle": "站点标题",
     "siteDescription": "站点描述",
     "logoUrl": "Logo URL",
@@ -497,6 +506,7 @@
     "visibilityPrivateHint": "需要输入密码才能访问",
     "statusPassword": "访问密码",
     "statusPasswordOptional": "(留空则保持原密码)",
+    "statusPasswordNeeded": "必填",
     "statusPasswordPlaceholder": "输入密码",
     "statusPasswordHint": "以 SHA-256 哈希存储。修改密码后所有访客需重新登录。",
     "statusPasswordRequired": "私密模式必须设置密码"
@@ -531,8 +541,11 @@
     "lastUsed": "最后使用 {time}",
     "delete": "删除",
     "deleted": "密钥已删除",
+    "deleteConfirm": "确定删除密钥「{name}」?",
     "usageTitle": "用法示例",
     "usageHint": "将密钥作为 Bearer token 调用接口。",
+    "usageExpand": "展开用法示例",
+    "usageCollapse": "收起用法示例",
     "usageComment1": "列出所有监控(全字段)",
     "usageComment2": "查询检查日志(分页 + 时间过滤)",
     "usageComment3": "全部事件",
@@ -590,14 +603,7 @@
   },
   "languages": {
     "en": "English",
-    "zh": "中文",
-    "ja": "日本語",
-    "ko": "한국어",
-    "de": "Deutsch",
-    "fr": "Français",
-    "it": "Italiano",
-    "es": "Español",
-    "zh-tw": "繁體中文"
+    "zh": "中文"
   },
   "date": {
     "m": "{n} 分钟前",
@@ -638,9 +644,10 @@
     "sslExpiry": "SSL {days} · {date}",
     "domainExpiry": "域名 {days} · {date}",
     "sslChecked": "已检查 SSL",
-    "uptime90": "可用率(近 90 天)",
+    "uptimeWindow": "可用率(近 {days} 天)",
     "latencyTrend": "延迟趋势",
-    "now": "现在",
+    "chartHint": "悬停查看数值 · 点击固定 · 方向键切换 · Esc 取消",
+    "pinned": "已固定",
     "noData": "暂无数据",
     "recentChecks": "最近检查",
     "recentChecksCount": "{count} 条",
@@ -664,7 +671,8 @@
     "stat90d": "近 90 天",
     "range24h": "24h",
     "range7d": "7d",
-    "range30d": "30d"
+    "range30d": "30d",
+    "range90d": "90d"
   },
   "statusLock": {
     "hint": "该状态页为私密页面,请输入密码继续访问。",
@@ -674,6 +682,7 @@
     "wrongPassword": "密码错误",
     "notConfigured": "状态页密码尚未设置",
     "requestFailed": "请求失败,请重试",
-    "logout": "退出访问"
+    "logout": "退出访问",
+    "logoutConfirm": "确定退出访问吗?之后需要重新输入访问密码。"
   }
 }

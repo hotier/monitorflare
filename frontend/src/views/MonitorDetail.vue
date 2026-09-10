@@ -93,22 +93,33 @@
             <div class="grid grid-cols-2 sm:grid-cols-4 gap-2.5 lg:w-[380px] shrink-0">
               <div v-for="s in stats" :key="s.label" class="rounded-xl border border-slate-200 dark:border-white/[0.08] bg-white/60 dark:bg-white/[0.03] px-3 py-2.5 text-center">
                 <p class="text-[10px] font-mono text-slate-400 dark:text-slate-600">{{ s.label }}</p>
-                <p class="text-lg font-bold mt-0.5" :class="s.value != null ? pctTextClass(s.value) : 'text-slate-300 dark:text-slate-700'">{{ s.value != null ? s.value + '%' : '—' }}</p>
+                <p class="text-lg font-bold font-mono mt-0.5" :class="s.value != null ? pctTextClass(s.value) : 'text-slate-300 dark:text-slate-700'">{{ s.value != null ? s.value + '%' : '—' }}</p>
               </div>
             </div>
           </div>
         </div>
 
-        <!-- 90 天可用率 -->
+        <!-- 可用率:窗口可切 7 / 30 / 90 天 -->
         <div class="glass rounded-2xl px-6 py-5 mb-5 fade-up-d2">
-          <div class="flex items-center justify-between mb-4">
+          <div class="flex flex-wrap items-center justify-between gap-2 mb-4">
             <h2 class="text-sm font-bold text-slate-700 dark:text-slate-300 flex items-center gap-2">
               <span class="w-1 h-4 rounded-full bg-emerald-500"></span>
-              {{ $t('monitorDetail.uptime90') }}
+              {{ $t('monitorDetail.uptimeWindow', { days: uptimeDays }) }}
             </h2>
-            <span v-if="monitor.uptime_90d != null" class="text-sm font-mono font-semibold" :class="pctTextClass(monitor.uptime_90d)">{{ monitor.uptime_90d }}%</span>
+            <div class="flex items-center gap-1 rounded-lg border border-slate-200 dark:border-white/10 p-0.5">
+              <button v-for="r in uptimeRanges" :key="r.days" @click="uptimeDays = r.days"
+                class="px-2.5 py-1 rounded-md text-[11px] font-mono font-medium transition-colors cursor-pointer"
+                :class="uptimeDays === r.days ? 'bg-emerald-500 text-white' : 'text-slate-500 dark:text-slate-400 hover:text-emerald-500'">
+                {{ r.label }}
+              </button>
+            </div>
           </div>
-          <UptimeBar v-if="monitor.daily_stats && monitor.daily_stats.length > 0" :monitor="monitor" />
+          <UptimeBar v-if="monitor.daily_stats && monitor.daily_stats.length > 0" :monitor="monitor" :days="uptimeDays" :height="32">
+            <!-- 可用率数字:与条下方的"今天"同处一行,右端对齐 -->
+            <template #tail>
+              <span v-if="uptimeValue != null" class="min-w-[52px] text-right text-sm font-mono font-semibold leading-none" :class="pctTextClass(uptimeValue)">{{ uptimeValue }}%</span>
+            </template>
+          </UptimeBar>
           <p v-else class="text-xs text-slate-400 dark:text-slate-600">{{ $t('monitorDetail.noData') }}</p>
         </div>
 
@@ -127,7 +138,9 @@
               </button>
             </div>
           </div>
-          <div v-if="seriesPoints.length >= 2" class="w-full">
+          <div v-if="seriesPoints.length >= 2" class="relative w-full select-none cursor-pointer rounded-lg outline-none focus-visible:ring-2 focus-visible:ring-sky-500/40"
+            tabindex="0"
+            @pointermove="onChartPointer" @pointerleave="onChartLeave" @click="onChartClick" @keydown="onChartKeydown" @blur="onChartBlur">
             <svg :viewBox="chartViewBox" class="w-full h-44" preserveAspectRatio="none">
               <defs>
                 <linearGradient :id="gradId" x1="0" y1="0" x2="0" y2="1">
@@ -138,11 +151,24 @@
               <line v-for="gy in gridYs" :key="gy.y" :x1="0" :x2="W" :y1="gy.y" :y2="gy.y" stroke="currentColor" stroke-opacity="0.08" stroke-dasharray="3 3" class="text-slate-400 dark:text-slate-500" />
               <path :d="chartArea" :fill="`url(#${gradId})`" />
               <path :d="chartLine" fill="none" stroke="#0ea5e9" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
-              <circle v-if="lastPoint" :cx="lastPoint.x" :cy="lastPoint.y" r="3" fill="#0ea5e9" />
+              <circle v-if="lastPoint && !activePoint" :cx="lastPoint.x" :cy="lastPoint.y" r="3" fill="#0ea5e9" />
+              <template v-if="activePoint">
+                <line :x1="activePoint.x" :x2="activePoint.x" :y1="0" :y2="H" stroke="#0ea5e9" stroke-opacity="0.4" stroke-width="1" stroke-dasharray="4 4" vector-effect="non-scaling-stroke" />
+                <circle :cx="activePoint.x" :cy="activePoint.y" :r="pinIdx !== null ? 4.5 : 4" fill="#0ea5e9" stroke="#fff" stroke-width="1.5" vector-effect="non-scaling-stroke" />
+              </template>
             </svg>
-            <div class="flex justify-between mt-1 text-[10px] font-mono text-slate-400 dark:text-slate-600">
+
+            <!-- 悬浮提示:与 90 天可用性条共用 .hover-tip 外观 -->
+            <div v-if="activePoint" class="hover-tip absolute"
+              :class="[activePoint.y < 64 ? 'tip-arrow-up' : 'tip-arrow-down', pinIdx !== null ? 'is-pinned' : '']" :style="tooltipStyle">
+              <p class="text-slate-400">{{ formatDateTime(activePoint.t) }}</p>
+              <p class="font-semibold" :class="latencyTipClass(activePoint.l)">{{ activePoint.l }}ms</p>
+            </div>
+
+            <div class="flex items-center justify-between mt-1 text-[10px] font-mono text-slate-400 dark:text-slate-600">
               <span>{{ firstPointLabel }}</span>
-              <span class="font-semibold text-sky-500">{{ $t('monitorDetail.now') }}</span>
+              <span v-if="pinIdx !== null" class="text-sky-500/80">{{ $t('monitorDetail.pinned') }}</span>
+              <span>{{ lastPointLabel }}</span>
             </div>
           </div>
           <p v-else class="text-xs text-slate-400 dark:text-slate-600">{{ $t('monitorDetail.noData') }}</p>
@@ -156,20 +182,20 @@
             <span class="text-[11px] font-mono font-normal text-slate-400 dark:text-slate-600">{{ $t('monitorDetail.recentChecksCount', { count: logs.length }) }}</span>
           </h2>
           <div v-if="logs.length > 0" class="overflow-x-auto -mx-2 px-2">
-            <table class="w-full text-left">
+            <table class="w-full min-w-[820px] table-fixed text-left">
               <thead>
                 <tr class="text-[10px] font-mono uppercase tracking-wider text-slate-400 dark:text-slate-600 border-b border-slate-200 dark:border-white/[0.08]">
-                  <th class="py-2 pr-3 font-medium">{{ $t('monitorDetail.colTime') }}</th>
-                  <th class="py-2 pr-3 font-medium">{{ $t('monitorDetail.colStatus') }}</th>
-                  <th class="py-2 pr-3 font-medium">{{ $t('monitorDetail.colCode') }}</th>
-                  <th class="py-2 pr-3 font-medium">{{ $t('monitorDetail.colLatency') }}</th>
+                  <th class="w-[230px] py-2 pr-5 font-medium">{{ $t('monitorDetail.colTime') }}</th>
+                  <th class="w-[130px] py-2 pr-5 font-medium">{{ $t('monitorDetail.colStatus') }}</th>
+                  <th class="w-[120px] py-2 pr-5 font-medium">{{ $t('monitorDetail.colCode') }}</th>
+                  <th class="w-[150px] py-2 pr-5 font-medium">{{ $t('monitorDetail.colLatency') }}</th>
                   <th class="py-2 font-medium">{{ $t('monitorDetail.colReason') }}</th>
                 </tr>
               </thead>
               <tbody>
                 <tr v-for="log in logs" :key="log.id" class="border-b border-slate-100 dark:border-white/[0.04] text-[12px] font-mono hover:bg-slate-50 dark:hover:bg-white/[0.02] transition-colors">
-                  <td class="py-2 pr-3 text-slate-500 dark:text-slate-400 whitespace-nowrap">{{ formatDateFull(log.created_at) }}</td>
-                  <td class="py-2 pr-3">
+                  <td class="py-2 pr-5 text-slate-500 dark:text-slate-400 whitespace-nowrap">{{ formatDateTime(log.created_at) }}</td>
+                  <td class="py-2 pr-5">
                     <span v-if="!log.is_fail" class="inline-flex items-center gap-1 text-emerald-600 dark:text-emerald-400 font-semibold">
                       <svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5"/></svg>
                       {{ $t('monitorDetail.statusUp') }}
@@ -179,9 +205,9 @@
                       {{ $t('monitorDetail.statusDown') }}
                     </span>
                   </td>
-                  <td class="py-2 pr-3" :class="log.is_fail ? 'text-red-600 dark:text-red-400' : 'text-slate-500 dark:text-slate-400'">{{ log.status_code || '—' }}</td>
-                  <td class="py-2 pr-3" :class="log.latency != null ? latencyTextClass(log.latency) : 'text-slate-400 dark:text-slate-600'">{{ log.latency != null ? log.latency + 'ms' : '—' }}</td>
-                  <td class="py-2 text-slate-400 dark:text-slate-500 max-w-[260px] truncate" :title="log.reason">{{ log.reason || '—' }}</td>
+                  <td class="py-2 pr-5 whitespace-nowrap" :class="log.is_fail ? 'text-red-600 dark:text-red-400' : 'text-slate-500 dark:text-slate-400'">{{ log.status_code || '—' }}</td>
+                  <td class="py-2 pr-5 whitespace-nowrap" :class="log.latency != null ? latencyTextClass(log.latency) : 'text-slate-400 dark:text-slate-600'">{{ log.latency != null ? log.latency + 'ms' : '—' }}</td>
+                  <td class="py-2 text-slate-400 dark:text-slate-500 truncate" :title="log.reason">{{ log.reason || '—' }}</td>
                 </tr>
               </tbody>
             </table>
@@ -230,7 +256,7 @@ import { useI18n } from 'vue-i18n';
 import { useTheme } from '../composables/useTheme';
 import { API_BASE, fetchT, withRetry } from '../utils/api';
 import {
-    formatDate, formatDateFull, getExpiryClass, formatExpiry, formatExpiryDate, latencyClass, statusBadgeClass,
+    formatDate, formatDateFull, formatDateTime, getExpiryClass, formatExpiry, formatExpiryDate, latencyTextClass, latencyTipClass, statusBadgeClass,
 } from '../utils/format';
 import { isStatusLocked, statusLogout, STATUS_TOKEN_KEY } from '../utils/api';
 
@@ -255,6 +281,8 @@ const range = ref('24h');
 const siteSettings = ref({ site_title: 'MonitorFlare', site_description: '', site_logo_url: '' });
 const statusToken = ref(localStorage.getItem(STATUS_TOKEN_KEY) || '');
 const seriesCache = {};
+const hoverIdx = ref(null);
+const pinIdx = ref(null);
 
 const monitorId = computed(() => String(route.params.id));
 
@@ -305,6 +333,19 @@ const stats = computed(() => [
     { label: t('monitorDetail.stat90d'), value: monitor.value?.uptime_90d },
 ]);
 
+/** 可用率卡片:窗口天数可切 7 / 30 / 90,默认 7 天;数字与条一并跟随 */
+const uptimeDays = ref(7);
+const uptimeRanges = computed(() => [
+    { days: 7, label: t('monitorDetail.range7d') },
+    { days: 30, label: t('monitorDetail.range30d') },
+    { days: 90, label: t('monitorDetail.range90d') },
+]);
+const uptimeValue = computed(() => {
+    const m = monitor.value;
+    if (!m) return null;
+    return { 7: m.uptime_7d, 30: m.uptime_30d, 90: m.uptime_90d }[uptimeDays.value] ?? null;
+});
+
 const ranges = computed(() => [
     { key: '24h', label: t('monitorDetail.range24h') },
     { key: '7d', label: t('monitorDetail.range7d') },
@@ -314,6 +355,8 @@ const ranges = computed(() => [
 const selectRange = (key) => {
     if (range.value === key && seriesPoints.value.length > 0) return;
     range.value = key;
+    hoverIdx.value = null;
+    pinIdx.value = null;
     loadSeries(key);
 };
 
@@ -361,17 +404,88 @@ const firstPointLabel = computed(() => {
     const t0 = latencySeries.value[0]?.created_at;
     return t0 ? formatDateFull(t0) : '';
 });
+/** 右端标签:不是"现在",而是最新一条记录的时间(数据可能滞后于当前时刻) */
+const lastPointLabel = computed(() => {
+    const t1 = latencySeries.value[latencySeries.value.length - 1]?.created_at;
+    return t1 ? formatDateFull(t1) : '';
+});
 const gridYs = computed(() => [0.2, 0.4, 0.6, 0.8].map(f => ({ y: P + f * (H - 2 * P) })));
 const gradId = `lat-grad-${monitorId.value}`;
+
+/* ---- 图表交互:悬停查看、点击固定、方向键切换 ---- */
+const activeIdx = computed(() => pinIdx.value ?? hoverIdx.value);
+const activePoint = computed(() => {
+    const idx = activeIdx.value;
+    const pts = seriesPoints.value;
+    if (idx === null || idx === undefined || idx < 0 || idx >= pts.length) return null;
+    return pts[idx];
+});
+
+const nearestIdx = (clientX, el) => {
+    const pts = seriesPoints.value;
+    if (!pts.length || !el) return null;
+    const rect = el.getBoundingClientRect();
+    if (!rect.width) return null;
+    const vx = ((clientX - rect.left) / rect.width) * W;
+    let best = 0, bestDist = Infinity;
+    for (let i = 0; i < pts.length; i++) {
+        const d = Math.abs(pts[i].x - vx);
+        if (d < bestDist) { bestDist = d; best = i; }
+    }
+    return best;
+};
+
+const onChartPointer = (e) => {
+    hoverIdx.value = nearestIdx(e.clientX, e.currentTarget);
+};
+const onChartLeave = () => {
+    hoverIdx.value = null;
+};
+const onChartClick = (e) => {
+    const idx = nearestIdx(e.clientX, e.currentTarget);
+    if (idx === null) return;
+    hoverIdx.value = idx;
+    pinIdx.value = pinIdx.value === idx ? null : idx;
+};
+const onChartBlur = () => {
+    hoverIdx.value = null;
+    pinIdx.value = null;
+};
+const onChartKeydown = (e) => {
+    const pts = seriesPoints.value;
+    if (!pts.length) return;
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+        e.preventDefault();
+        const cur = activeIdx.value ?? pts.length - 1;
+        const next = Math.min(Math.max(cur + (e.key === 'ArrowRight' ? 1 : -1), 0), pts.length - 1);
+        hoverIdx.value = next;
+        pinIdx.value = next;
+    } else if (e.key === 'Escape') {
+        hoverIdx.value = null;
+        pinIdx.value = null;
+    }
+};
+
+/** 提示框定位:贴近数据点,靠近左右边缘时贴边,点位偏上时翻到下方(箭头随之换向) */
+const tooltipStyle = computed(() => {
+    const p = activePoint.value;
+    if (!p) return {};
+    const xPct = (p.x / W) * 100;
+    const shiftX = xPct < 12 ? '0' : xPct > 88 ? '-100%' : '-50%';
+    const shiftY = p.y < 64 ? '12px' : 'calc(-100% - 12px)';
+    return {
+        left: `${xPct}%`,
+        top: `${p.y}px`,
+        transform: `translate(${shiftX}, ${shiftY})`,
+        // 贴边时框不再以点位为中心,箭头跟着挪到朝向点位的那条边
+        '--tip-arrow-x': shiftX === '0' ? '12px' : shiftX === '-100%' ? 'calc(100% - 12px)' : '50%',
+    };
+});
 
 const pctTextClass = (p) => {
     if (p >= 99.9) return 'text-emerald-600 dark:text-emerald-400';
     if (p >= 95) return 'text-yellow-600 dark:text-yellow-400';
     return 'text-red-600 dark:text-red-400';
-};
-const latencyTextClass = (ms) => {
-    const cls = latencyClass(ms);
-    return cls.split(' ').filter(c => c.startsWith('text-')).join(' ');
 };
 
 const incidentClass = (inc) => {

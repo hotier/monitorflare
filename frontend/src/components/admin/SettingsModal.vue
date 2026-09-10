@@ -11,7 +11,6 @@
             </div>
             <div>
               <h3 class="text-lg font-bold text-white">{{ $t('settings.title') }}</h3>
-              <p class="text-xs text-slate-500">{{ $t('settings.subtitle') }}</p>
             </div>
           </div>
           <button @click="emit('close')" class="p-2 rounded-xl text-slate-400 hover:text-white hover:bg-white/10 transition cursor-pointer" :aria-label="$t('common.close')">
@@ -72,8 +71,12 @@
                   </button>
                 </div>
 
-                <label class="grid gap-2">
-                  <span class="text-sm font-medium text-slate-300">{{ $t('settings.statusPassword') }} <span class="text-xs font-normal text-slate-500">{{ $t('settings.statusPasswordOptional') }}</span></span>
+                <!-- 密码只在私密模式下有意义:公开时后端完全不看它,显示出来只会误导 -->
+                <label v-if="settings.status_page_visibility === 'private'" class="grid gap-2">
+                  <span class="text-sm font-medium text-slate-300">
+                    {{ $t('settings.statusPassword') }}
+                    <span class="text-xs font-normal text-slate-500">{{ hasStatusPassword ? $t('settings.statusPasswordOptional') : $t('settings.statusPasswordNeeded') }}</span>
+                  </span>
                   <input v-model.trim="statusPassword" type="password" autocomplete="new-password" :placeholder="$t('settings.statusPasswordPlaceholder')"
                     class="w-full border border-slate-700 rounded-xl px-3 py-2.5 text-sm bg-slate-800/80 text-white focus:border-emerald-500 outline-none">
                   <span class="text-xs text-slate-500">{{ $t('settings.statusPasswordHint') }}</span>
@@ -88,16 +91,12 @@
 
                 <label class="grid gap-2">
                   <span class="text-sm font-medium text-slate-300">{{ $t('settings.language') }}</span>
-                  <select v-model="settings.language" class="w-full border border-slate-700 rounded-xl px-3 py-2.5 text-sm bg-slate-800/80 text-white focus:border-emerald-500 outline-none">
-                    <option v-for="lang in languageOptions" :key="lang" :value="lang">{{ $t('languages.' + lang) }}</option>
-                  </select>
+                  <AppSelect v-model="settings.language" variant="field-md" :options="languageSelectOptions" />
                 </label>
 
                 <label class="grid gap-2">
                   <span class="text-sm font-medium text-slate-300">{{ $t('settings.timezone') }}</span>
-                  <select v-model="settings.timezone" class="w-full border border-slate-700 rounded-xl px-3 py-2.5 text-sm bg-slate-800/80 text-white focus:border-emerald-500 outline-none">
-                    <option v-for="tz in timezoneOptions" :key="tz.value" :value="tz.value">{{ $t('timezones.' + tz.key) }}</option>
-                  </select>
+                  <AppSelect v-model="settings.timezone" variant="field-md" :options="timezoneSelectOptions" />
                 </label>
               </section>
 
@@ -189,15 +188,16 @@
 </template>
 
 <script setup>
-import { ref } from 'vue';
+import { ref, computed } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useAuth } from '../../composables/useAuth';
 import { useToast } from '../../composables/useToast';
 import { API_BASE, fetchT } from '../../utils/api';
 import { setAppLanguage, setAppTimezone } from '../../main';
+import AppSelect from '../common/AppSelect.vue';
 
 const { t } = useI18n();
-const emit = defineEmits(['close', 'import-done']);
+const emit = defineEmits(['close', 'saved', 'import-done']);
 const { storedToken } = useAuth();
 const { addToast } = useToast();
 
@@ -208,7 +208,9 @@ const sha256Hex = async (value) => {
 const saving = ref(false);
 const importing = ref(false);
 const variables = ['{name}', '{url}', '{reason}', '{latency}', '{status}', '{error_rate}', '{threshold}', '{time}'];
-const languageOptions = ['en', 'zh', 'zh-tw', 'ja', 'ko', 'de', 'fr', 'it', 'es'];
+const languageOptions = ['en', 'zh'];
+const languageSelectOptions = computed(() => languageOptions.map(l => ({ value: l, label: t('languages.' + l) })));
+const timezoneSelectOptions = computed(() => timezoneOptions.map(tz => ({ value: tz.value, label: t('timezones.' + tz.key) })));
 const timezoneOptions = [
     { value: 'UTC', key: 'utc' },
     { value: 'Asia/Shanghai', key: 'asiaShanghai' },
@@ -232,11 +234,13 @@ const settings = ref({
     alert_template_down: '',
     alert_template_up: '',
     alert_template_error_rate: '',
-    language: 'en',
-    timezone: 'UTC',
+    language: 'zh',
+    timezone: 'Asia/Shanghai',
     status_page_visibility: 'public',
 });
 const statusPassword = ref('');
+/** 是否已设置过访问密码(GET /settings 会返回哈希),用于区分"必填"与"留空则保持原密码" */
+const hasStatusPassword = ref(false);
 
 const authFetch = async (url, opts = {}) => fetchT(url, { ...opts, headers: { ...opts.headers, 'Authorization': `Bearer ${storedToken.value}` } });
 
@@ -252,11 +256,12 @@ const fetchSettings = async () => {
                 alert_template_down: d.alert_template_down || '',
                 alert_template_up: d.alert_template_up || '',
                 alert_template_error_rate: d.alert_template_error_rate || '',
-                language: d.language || 'en',
-                timezone: d.timezone || 'UTC',
+                language: d.language || 'zh',
+                timezone: d.timezone || 'Asia/Shanghai',
                 status_page_visibility: d.status_page_visibility === 'private' ? 'private' : 'public',
             };
             statusPassword.value = '';
+            hasStatusPassword.value = !!d.status_page_password;
         }
     } catch {
         addToast(t('settings.loadFailed'), 'error');
@@ -265,7 +270,8 @@ const fetchSettings = async () => {
 
 const save = async () => {
     if (saving.value) return;
-    if (settings.value.status_page_visibility === 'private' && !statusPassword.value) {
+    // 仅在"切到私密但还没有任何密码"时拦截;已有密码且留空表示保持原密码
+    if (settings.value.status_page_visibility === 'private' && !statusPassword.value && !hasStatusPassword.value) {
         addToast(t('settings.statusPasswordRequired'), 'error');
         return;
     }
@@ -282,6 +288,7 @@ const save = async () => {
             addToast(t('settings.saved'), 'success');
             setAppLanguage(settings.value.language);
             setAppTimezone(settings.value.timezone);
+            emit('saved');
             emit('close');
         } else {
             addToast(t('common.saveFailed'), 'error');

@@ -10,8 +10,8 @@
     <LoginDialog v-if="!isAuthenticated" @login="onLogin" />
 
     <!-- 顶部导航 -->
-    <AdminHeader v-if="isAuthenticated" :isDark="isDark" :loading="loading" :lastRefreshed="lastRefreshed"
-      @toggle-theme="toggleTheme" @refresh="fetchMonitors" @logout="logout" />
+    <AdminHeader v-if="isAuthenticated" :isDark="isDark" :siteSettings="siteSettings"
+      @toggle-theme="toggleTheme" @logout="logout" />
 
     <!-- 主要内容 -->
     <main v-if="isAuthenticated" class="flex-1 max-w-5xl w-full mx-auto px-4 py-8">
@@ -86,12 +86,12 @@
       <!-- 监控列表 -->
       <MonitorList v-else
         :monitors="monitors" :filteredMonitors="filteredMonitors" :allTags="allTags"
-        :activeTag="activeTag" :selectedIds="selectedIds" :searchQuery="searchQuery" :sortKey="sortKey"
+        :activeTag="activeTag" :selectedIds="selectedIds" :searchQuery="searchQuery" :sortKey="sortKey" :loading="loading" :batchChecking="batchChecking"
         @update:activeTag="activeTag = $event" @update:selectedIds="selectedIds = $event"
         @update:searchQuery="searchQuery = $event" @update:sortKey="sortKey = $event"
         @force-check="forceCheck" @toggle-pause="togglePause" @open-config="openConfig"
         @view-logs="viewLogs" @clone="cloneMonitor" @delete="deleteMonitor"
-        @batch-action="batchAction" @reorder="handleReorder"
+        @batch-action="batchAction" @reorder="handleReorder" @refresh="fetchMonitors"
       />
     </main>
 
@@ -123,11 +123,9 @@
 
     <IncidentsModal v-if="showIncidents" :monitors="monitors" @close="showIncidents = false" />
 
-    <SettingsModal v-if="showSettings" :monitors="monitors" @close="showSettings = false" @import-done="fetchMonitors" />
+    <SettingsModal v-if="showSettings" :monitors="monitors" @close="showSettings = false" @saved="fetchSiteSettings" @import-done="fetchMonitors" />
 
     <ApiKeysModal v-if="showApiKeys" @close="showApiKeys = false" />
-
-    <ConfirmDialog v-if="confirmModal.show" :message="confirmModal.message" @confirm="handleConfirm(true)" @cancel="handleConfirm(false)" />
 
     <ToastContainer />
   </div>
@@ -139,6 +137,7 @@ import { useI18n } from 'vue-i18n';
 import { useAuth } from '../composables/useAuth';
 import { useTheme } from '../composables/useTheme';
 import { useToast } from '../composables/useToast';
+import { useConfirm } from '../composables/useConfirm';
 import { API_BASE, fetchT, withRetry } from '../utils/api';
 import { formatDateFull } from '../utils/format';
 
@@ -154,10 +153,11 @@ import ChannelsModal from '../components/admin/ChannelsModal.vue';
 import IncidentsModal from '../components/admin/IncidentsModal.vue';
 import SettingsModal from '../components/admin/SettingsModal.vue';
 import ApiKeysModal from '../components/admin/ApiKeysModal.vue';
-import ConfirmDialog from '../components/admin/ConfirmDialog.vue';
 import ToastContainer from '../components/admin/ToastContainer.vue';
 
-const { isDark, toggleTheme } = useTheme('admin_theme');
+// 主题 key 与状态页保持一致(localStorage.theme)。
+// 若此处单独用别的 key,进入后台时 initTheme 会按「跟随系统」把 <html>.dark 摘掉,导致整页被切回浅色。
+const { isDark, toggleTheme } = useTheme('theme');
 const { isAuthenticated, storedToken, logout } = useAuth();
 const { addToast } = useToast();
 const { t } = useI18n();
@@ -169,14 +169,15 @@ const footerUrl = import.meta.env.VITE_FOOTER_URL || '#';
 const monitors = ref([]);
 const loading = ref(false);
 const error = ref(null);
-const lastRefreshed = ref('');
 const health = ref(null);
+const siteSettings = ref({});
 
 // ── 搜索/排序/筛选 ──
 const searchQuery = ref('');
 const sortKey = ref('');
 const activeTag = ref('');
 const selectedIds = ref([]);
+const batchChecking = ref(false);
 
 // ── Modal 控制 ──
 const showAddModal = ref(false);
@@ -188,7 +189,7 @@ const showSettings = ref(false);
 const showApiKeys = ref(false);
 
 // ── 添加监控 ──
-const newMonitor = ref({ name: '', url: '', type: 'http', record_type: 'A', expected: '', port: 443, method: 'GET', keyword: '', user_agent: '', tags: '', request_headers: '', request_body: '', interval: 300, check_ssl: true, check_domain: true, alert_silence_hours: '24', alert_error_rate: 0 });
+const newMonitor = ref({ name: '', url: '', type: 'http', record_type: 'A', expected: '', port: 443, method: 'GET', keyword: '', user_agent: '', tags: '', request_headers: '', request_body: '', interval: 300, check_ssl: true, check_domain: true, alert_silence_uptime: 24, alert_error_rate: 0 });
 const submitting = ref(false);
 
 // ── 配置面板 ──
@@ -204,15 +205,8 @@ const logOffset = ref(0);
 const logLimit = 50;
 const hasMoreLogs = ref(false);
 
-// ── 确认对话框 ──
-const confirmModal = ref({ show: false, message: '', resolve: null });
-const showConfirm = (message) => new Promise(resolve => {
-    confirmModal.value = { show: true, message, resolve };
-});
-const handleConfirm = (result) => {
-    if (confirmModal.value.resolve) confirmModal.value.resolve(result);
-    confirmModal.value.show = false;
-};
+// ── 确认对话框(全局单例,渲染在 App.vue) ──
+const { confirmState, confirmDialog, resolveConfirm } = useConfirm();
 
 // ── 带鉴权 fetch ──
 const authFetch = async (url, options = {}) => {
@@ -273,7 +267,6 @@ const fetchMonitors = async () => {
             let publicMap = {};
             if (publicRes && publicRes.ok) { try { const pd = await publicRes.json(); (pd.monitors || []).forEach(pm => { publicMap[pm.id] = pm; }); } catch {} }
             monitors.value = adminData.map(m => { const pm = publicMap[m.id]; m._latency = pm?.latency ?? null; m._sparkData = pm?.recent_latencies ?? null; return m; });
-            lastRefreshed.value = new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
         } else {
             let errorMsg = t('adminPage.loadFailed', { status: adminRes?.status || t('common.networkError') });
             if (adminRes) { try { const d = await adminRes.json(); if (d?.error) errorMsg = t('statusPage.apiError', { error: d.error }); } catch {} }
@@ -291,7 +284,20 @@ const fetchHealth = async () => {
     } catch {}
 };
 
-const onLogin = () => { fetchMonitors(); fetchHealth(); };
+// 站点品牌信息(logo/标题),与状态页一致
+const fetchSiteSettings = async () => {
+    try {
+        const res = await fetchT(`${API_BASE}/settings`);
+        if (res.ok) {
+            siteSettings.value = await res.json();
+            if (siteSettings.value.site_title) document.title = siteSettings.value.site_title;
+            const meta = document.querySelector('meta[name=description]');
+            if (meta && siteSettings.value.site_description) meta.content = siteSettings.value.site_description;
+        }
+    } catch {}
+};
+
+const onLogin = () => { fetchMonitors(); fetchHealth(); fetchSiteSettings(); };
 
 // ── 添加监控 ──
 const addMonitor = async () => {
@@ -302,7 +308,11 @@ const addMonitor = async () => {
         const type = _type || 'http';
         let config = '{}';
         if (type === 'dns') config = JSON.stringify({ record_type: record_type || 'A', expected: expected || '' });
-        else if (type === 'port') config = JSON.stringify({ port: Number(port) || 443 });
+        else if (type === 'port') {
+            const portNum = Number(port);
+            if (!Number.isInteger(portNum) || portNum < 1 || portNum > 65535) { addToast(t('adminPage.invalidPort'), 'error'); return; }
+            config = JSON.stringify({ port: portNum });
+        }
         const body = { ...rest, type, config, check_ssl: newMonitor.value.check_ssl ? 1 : 0, check_domain: newMonitor.value.check_domain ? 1 : 0, interval: Number(newMonitor.value.interval) };
         const res = await authFetch(`${API_BASE}/monitors`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
         if (res.ok) { newMonitor.value = { name: '', url: '', type: 'http', record_type: 'A', expected: '', port: 443, method: 'GET', keyword: '', user_agent: '', tags: '', request_headers: '', request_body: '', interval: 300, check_ssl: true, check_domain: true, alert_silence_hours: '24', alert_error_rate: 0 }; showAddModal.value = false; addToast(t('adminPage.monitorAdded'), 'success'); fetchMonitors(); }
@@ -313,7 +323,7 @@ const addMonitor = async () => {
 
 // ── 删除 ──
 const deleteMonitor = async (m) => {
-    const ok = await showConfirm(t('adminPage.confirmDelete', { name: m.name })); if (!ok) return;
+    const ok = await confirmDialog(t('adminPage.confirmDelete', { name: m.name })); if (!ok) return;
     try { const res = await authFetch(`${API_BASE}/monitors/${m.id}`, { method: 'DELETE' }); if (res.ok) { addToast(t('adminPage.deleted', { name: m.name }), 'success'); fetchMonitors(); } else { addToast(t('common.deleteFailed'), 'error'); } } catch { addToast(t('common.networkError'), 'error'); }
 };
 
@@ -332,7 +342,7 @@ const togglePause = async (m) => {
 // ── 克隆 ──
 const cloneMonitor = (m) => {
     let cfg = {}; try { cfg = JSON.parse(m.config || '{}'); } catch {}
-    newMonitor.value = { name: m.name + ' (Copy)', url: m.url, type: m.type || 'http', record_type: cfg.record_type || 'A', expected: cfg.expected || '', port: cfg.port ?? '', method: m.method || 'GET', keyword: m.keyword || '', user_agent: m.user_agent || '', tags: m.tags || '', request_headers: m.request_headers || '', request_body: m.request_body || '', interval: m.interval || 300, check_ssl: m.check_ssl !== 0, check_domain: m.check_domain !== 0, alert_silence_hours: m.alert_silence_uptime || 24, alert_error_rate: m.alert_error_rate || 0 };
+    newMonitor.value = { name: m.name + ' (Copy)', url: m.url, type: m.type || 'http', record_type: cfg.record_type || 'A', expected: cfg.expected || '', port: cfg.port ?? '', method: m.method || 'GET', keyword: m.keyword || '', user_agent: m.user_agent || '', tags: m.tags || '', request_headers: m.request_headers || '', request_body: m.request_body || '', interval: m.interval || 300, check_ssl: m.check_ssl !== 0, check_domain: m.check_domain !== 0, alert_silence_uptime: m.alert_silence_uptime || 24, alert_error_rate: m.alert_error_rate || 0 };
     showAddModal.value = true;
 };
 
@@ -344,7 +354,9 @@ const openConfig = (m) => {
 };
 
 const saveConfig = async () => {
-    if (!configTarget.value) return; configSaving.value = true;
+    if (!configTarget.value) return;
+    if (!String(configForm.value.name || '').trim() || !String(configForm.value.url || '').trim()) { addToast(t('adminPage.fillNameUrl'), 'error'); return; }
+    configSaving.value = true;
     try {
         const body = { name: configForm.value.name, url: configForm.value.url, method: configForm.value.method || 'GET', keyword: configForm.value.keyword, user_agent: configForm.value.user_agent, tags: configForm.value.tags || '', request_headers: configForm.value.request_headers || '', request_body: configForm.value.request_body || '', interval: Number(configForm.value.interval), check_ssl: configForm.value.check_ssl ? 1 : 0, check_domain: configForm.value.check_domain ? 1 : 0, alert_silence_uptime: Number(configForm.value.alert_silence_uptime), alert_silence_ssl: Number(configForm.value.alert_silence_ssl), alert_silence_domain: Number(configForm.value.alert_silence_domain), alert_error_rate: Number(configForm.value.alert_error_rate ?? 0) };
         const res = await authFetch(`${API_BASE}/monitors/${configTarget.value.id}/config`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -371,10 +383,21 @@ const sparklineComputed = computed(() => {
     const W = 560, H = 56, P = 6;
     const latencies = ordered.map(l => l.latency || 0);
     const maxL = Math.max(...latencies, 1);
-    const points = ordered.map((log, i) => ({ x: P + (i / Math.max(ordered.length - 1, 1)) * (W - P * 2), y: H - P - ((log.latency || 0) / maxL) * (H - P * 2), fail: !!log.is_fail }));
+    const points = ordered.map((log, i) => ({ x: P + (i / Math.max(ordered.length - 1, 1)) * (W - P * 2), y: H - P - ((log.latency || 0) / maxL) * (H - P * 2), fail: !!log.is_fail, t: log.created_at, l: log.latency || 0 }));
     let path = '', penDown = false;
     points.forEach(p => { if (!p.fail) { path += penDown ? ` L ${p.x.toFixed(1)} ${p.y.toFixed(1)}` : `M ${p.x.toFixed(1)} ${p.y.toFixed(1)}`; penDown = true; } else { penDown = false; } });
-    return { points, path, maxL, W, H };
+    // 面积路径:与折线同源,但按"连续成功段"分别闭合到底边。失败点把折线断开,
+    // 面积若整条连通就会横跨断口,看着像这段时间一直在监测,所以同样分段。
+    let area = '', seg = [];
+    const flushArea = () => {
+        if (seg.length >= 2) {
+            area += `M ${seg[0].x.toFixed(1)} ${H} L ${seg.map(p => `${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(' L ')} L ${seg[seg.length - 1].x.toFixed(1)} ${H} Z `;
+        }
+        seg = [];
+    };
+    points.forEach(p => { if (p.fail) flushArea(); else seg.push(p); });
+    flushArea();
+    return { points, path, area, maxL, W, H };
 });
 
 const uptimeStats = computed(() => {
@@ -394,8 +417,22 @@ const latencyPercentiles = computed(() => {
 // ── 批量操作 ──
 const batchAction = async (action) => {
     if (selectedIds.value.length === 0) return;
-    if (action === 'delete') { const ok = await showConfirm(t('adminPage.batchConfirm', { count: selectedIds.value.length })); if (!ok) return; }
-    try { const res = await authFetch(`${API_BASE}/monitors/batch`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action, ids: selectedIds.value }) }); if (res.ok) { const d = await res.json(); addToast(t('adminPage.batchSuccess', { count: d.affected }), 'success'); selectedIds.value = []; fetchMonitors(); } else { addToast(t('adminPage.batchFailed'), 'error'); } } catch { addToast(t('common.networkError'), 'error'); }
+    if (action === 'delete') { const ok = await confirmDialog(t('adminPage.batchConfirm', { count: selectedIds.value.length })); if (!ok) return; }
+    if (action === 'check') batchChecking.value = true;
+    try {
+        const res = await authFetch(`${API_BASE}/monitors/batch`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action, ids: selectedIds.value }) });
+        if (res.ok) {
+            const d = await res.json();
+            if (action === 'check') {
+                addToast(t('adminPage.batchRefreshed', { count: d.affected ?? selectedIds.value.length }), 'success');
+            } else {
+                addToast(t('adminPage.batchSuccess', { count: d.affected ?? selectedIds.value.length }), 'success');
+                selectedIds.value = [];
+            }
+            fetchMonitors();
+        } else { addToast(t('adminPage.batchFailed'), 'error'); }
+    } catch { addToast(t('common.networkError'), 'error'); }
+    finally { if (action === 'check') batchChecking.value = false; }
 };
 
 // ── 排序 ──
@@ -422,10 +459,10 @@ onMounted(() => {
         // 清理 URL 中的 token,避免泄露
         history.replaceState(null, '', window.location.pathname);
     }
-    if (isAuthenticated.value) { fetchMonitors(); fetchHealth(); setInterval(fetchMonitors, 30000); }
+    if (isAuthenticated.value) { fetchMonitors(); fetchHealth(); fetchSiteSettings(); setInterval(fetchMonitors, 30000); }
     document.addEventListener('keydown', (e) => {
         if (['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)) return;
-        if (e.key === 'Escape') { showAddModal.value = false; showLogs.value = false; showConfig.value = false; showChannels.value = false; showIncidents.value = false; showSettings.value = false; if (confirmModal.value.show) handleConfirm(false); }
+        if (e.key === 'Escape') { showAddModal.value = false; showLogs.value = false; showConfig.value = false; showChannels.value = false; showIncidents.value = false; showSettings.value = false; if (confirmState.value.show) resolveConfirm(false); }
         if ((e.key === 'n' || e.key === 'N') && !showAddModal.value && !showLogs.value && !showConfig.value) { e.preventDefault(); showAddModal.value = true; }
         if ((e.key === 'r' || e.key === 'R') && !showAddModal.value && !showLogs.value && !showConfig.value) { e.preventDefault(); fetchMonitors(); }
         if (e.key === '/' && !showAddModal.value && !showLogs.value && !showConfig.value) { e.preventDefault(); document.querySelector('.search-input')?.focus(); }

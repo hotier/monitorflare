@@ -48,35 +48,35 @@ describe('formatDate', () => {
   });
 
   it('超过一小时改为显示时刻', () => {
-    expect(formatDate(at(-2 * 3_600_000))).toBe('10:00');
-  });
-
-  it('时刻按配置的时区渲染', () => {
-    localStorage.setItem('monitorflare_tz', 'Asia/Shanghai');
     expect(formatDate(at(-2 * 3_600_000))).toBe('18:00');
   });
 
-  it('默认时区为 UTC', () => {
-    expect(formatDate('2024-03-05T10:00:00Z')).toBe('10:00');
+  it('时刻按配置的时区渲染', () => {
+    localStorage.setItem('monitorflare_tz', 'UTC');
+    expect(formatDate(at(-2 * 3_600_000))).toBe('10:00');
+  });
+
+  it('默认时区为上海', () => {
+    expect(formatDate('2024-03-05T10:00:00Z')).toBe('18:00');
   });
 
   it('识别带空格的无时区时间戳', () => {
-    expect(formatDate('2024-03-05 10:00:00')).toBe('10:00');
+    expect(formatDate('2024-03-05 10:00:00')).toBe('18:00');
   });
 });
 
 describe('formatDateFull', () => {
-  it('按用户时区输出完整时间', () => {
-    expect(formatDateFull('2024-03-05 06:07:08')).toBe('03-05 06:07:08');
-  });
-
-  it('切换时区后输出随之改变', () => {
-    localStorage.setItem('monitorflare_tz', 'Asia/Shanghai');
+  it('按默认时区输出完整时间', () => {
     expect(formatDateFull('2024-03-05 06:07:08')).toBe('03-05 14:07:08');
   });
 
+  it('切换时区后输出随之改变', () => {
+    localStorage.setItem('monitorflare_tz', 'UTC');
+    expect(formatDateFull('2024-03-05 06:07:08')).toBe('03-05 06:07:08');
+  });
+
   it('已带偏移量的时间戳不被二次补 Z', () => {
-    expect(formatDateFull('2024-03-05T06:07:08+02:00')).toBe('03-05 04:07:08');
+    expect(formatDateFull('2024-03-05T06:07:08+02:00')).toBe('03-05 12:07:08');
   });
 
   it('空值返回占位符', () => {

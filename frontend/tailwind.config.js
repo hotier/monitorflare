@@ -9,7 +9,7 @@ export default {
     extend: {
       fontFamily: {
         sans: ['"PingFang SC"', '"Microsoft YaHei"', 'sans-serif'],
-        mono: ['"JetBrains Mono"', 'monospace'],
+        mono: ['"JetBrains Mono"', '"PingFang SC"', '"Microsoft YaHei"', 'monospace'],
       },
       colors: {
         surface: 'rgba(15,23,42,0.55)',

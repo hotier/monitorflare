@@ -71,11 +71,7 @@
 
               <label class="grid gap-2">
                 <span class="text-sm font-medium text-slate-300">{{ $t('incidents.severity') }}</span>
-                <select v-model="form.severity" class="w-full border border-slate-700 rounded-xl px-3 py-2.5 text-sm bg-slate-800 text-white outline-none focus:border-emerald-500">
-                  <option value="info">{{ $t('incidents.info') }}</option>
-                  <option value="warning">{{ $t('incidents.warning') }}</option>
-                  <option value="critical">{{ $t('incidents.critical') }}</option>
-                </select>
+                <AppSelect v-model="form.severity" variant="field-md" :options="severityOptions" />
               </label>
             </section>
 
@@ -83,11 +79,11 @@
               <div class="grid sm:grid-cols-2 gap-3">
                 <label class="grid gap-2">
                   <span class="text-sm font-medium text-slate-300">{{ $t('incidents.startTime') }}</span>
-                  <input type="datetime-local" v-model="form.scheduled_start" class="w-full border border-slate-700 rounded-xl px-3 py-2.5 text-sm bg-slate-800 text-white outline-none focus:border-emerald-500">
+                  <AppDateTimePicker v-model="form.scheduled_start" />
                 </label>
                 <label class="grid gap-2">
                   <span class="text-sm font-medium text-slate-300">{{ $t('incidents.endTime') }}</span>
-                  <input type="datetime-local" v-model="form.scheduled_end" class="w-full border border-slate-700 rounded-xl px-3 py-2.5 text-sm bg-slate-800 text-white outline-none focus:border-emerald-500">
+                  <AppDateTimePicker v-model="form.scheduled_end" />
                 </label>
               </div>
 
@@ -100,7 +96,7 @@
                   <label v-for="m in props.monitors" :key="m.id" class="flex items-center gap-2 rounded-lg border px-3 py-2 cursor-pointer text-sm transition"
                     :class="[
                       form.affected_ids.includes(m.id)
-                        ? 'border-cyan-500/40 bg-cyan-500/10 text-cyan-200'
+                        ? 'border-cyan-500/40 bg-cyan-500/10 text-cyan-700 dark:text-cyan-200'
                         : 'border-slate-300 dark:border-slate-700 bg-white/70 dark:bg-slate-900/40 text-slate-500 dark:text-slate-400 hover:border-slate-500'
                     ]">
                     <input type="checkbox" :value="m.id" v-model="form.affected_ids" class="sr-only">
@@ -207,16 +203,25 @@ import { computed, ref } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useAuth } from '../../composables/useAuth';
 import { useToast } from '../../composables/useToast';
+import { useConfirm } from '../../composables/useConfirm';
 import { API_BASE, fetchT } from '../../utils/api';
 import { formatDateFull } from '../../utils/format';
+import AppSelect from '../common/AppSelect.vue';
+import AppDateTimePicker from '../common/AppDateTimePicker.vue';
 
 const { t } = useI18n();
+const severityOptions = computed(() => [
+    { value: 'info',     label: t('incidents.info') },
+    { value: 'warning',  label: t('incidents.warning') },
+    { value: 'critical', label: t('incidents.critical') },
+]);
 const props = defineProps({
     monitors: { type: Array, default: () => [] },
 });
 const emit = defineEmits(['close']);
 const { storedToken } = useAuth();
 const { addToast } = useToast();
+const { confirmDialog } = useConfirm();
 
 const incidents = ref([]);
 const loading = ref(false);
@@ -328,7 +333,8 @@ const resolve = async (inc) => {
 };
 
 const remove = async (inc) => {
-    if (!confirm(t('incidents.deleteConfirm', { title: inc.title }))) return;
+    const ok = await confirmDialog(t('incidents.deleteConfirm', { title: inc.title }));
+    if (!ok) return;
     try {
         const r = await authFetch(`${API_BASE}/incidents/${inc.id}`, { method: 'DELETE' });
         if (r.ok) {

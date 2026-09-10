@@ -24,20 +24,43 @@
           </div>
         </div>
 
-        <!-- Sparkline 折线图 -->
+        <!-- Sparkline 折线图:可交互(悬停查看 / 点击固定 / 方向键切换),与监控详情页同一套做法 -->
         <div v-if="logs.length > 1 && sparkline" class="px-8 py-4 border-b border-white/5 sparkline-container bg-slate-900/20">
           <div class="flex items-center justify-between mb-2">
             <span class="text-xs font-bold text-slate-400 uppercase tracking-wider">{{ $t('logs.latencyTrend') }}</span>
             <span class="text-xs text-slate-500 font-mono">{{ $t('logs.maxLatency', { max: sparkline.maxL }) }}</span>
           </div>
-          <svg :viewBox="`0 0 ${sparkline.W} ${sparkline.H}`" class="w-full h-14" preserveAspectRatio="none">
-            <path :d="sparkline.path" fill="none" stroke="#22c55e" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" />
-            <circle v-for="(p, i) in sparkline.points" :key="i" :cx="p.x" :cy="p.y" r="3" :fill="p.fail ? '#ef4444' : '#22c55e'" :opacity="p.fail ? 1 : 0.8" />
-            <g v-for="(p, i) in sparkline.points.filter(pt => pt.fail)" :key="'x' + i">
-              <line :x1="p.x - 4" :y1="p.y - 4" :x2="p.x + 4" :y2="p.y + 4" stroke="#ef4444" stroke-width="1.5" />
-              <line :x1="p.x + 4" :y1="p.y - 4" :x2="p.x - 4" :y2="p.y + 4" stroke="#ef4444" stroke-width="1.5" />
-            </g>
-          </svg>
+          <div class="relative select-none cursor-pointer rounded-lg outline-none focus-visible:ring-2 focus-visible:ring-sky-500/40"
+            tabindex="0"
+            @pointermove="onChartPointer" @pointerleave="onChartLeave" @click="onChartClick" @keydown="onChartKeydown" @blur="onChartBlur">
+            <svg :viewBox="`0 0 ${sparkline.W} ${sparkline.H}`" class="w-full block" :style="{ height: sparkline.H + 'px' }" preserveAspectRatio="none">
+              <defs>
+                <!-- 面积渐变:与监控详情页延迟趋势图同一套参数(顶部 25% 主题色 → 底部透明) -->
+                <linearGradient id="logs-latency-grad" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stop-color="#22c55e" stop-opacity="0.25" />
+                  <stop offset="100%" stop-color="#22c55e" stop-opacity="0" />
+                </linearGradient>
+              </defs>
+              <path :d="sparkline.area" fill="url(#logs-latency-grad)" />
+              <path :d="sparkline.path" fill="none" stroke="#22c55e" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" />
+              <circle v-for="(p, i) in sparkline.points" :key="i" :cx="p.x" :cy="p.y" r="3" :fill="p.fail ? '#ef4444' : '#22c55e'" :opacity="p.fail ? 1 : 0.8" />
+              <g v-for="(p, i) in sparkline.points.filter(pt => pt.fail)" :key="'x' + i">
+                <line :x1="p.x - 4" :y1="p.y - 4" :x2="p.x + 4" :y2="p.y + 4" stroke="#ef4444" stroke-width="1.5" />
+                <line :x1="p.x + 4" :y1="p.y - 4" :x2="p.x - 4" :y2="p.y + 4" stroke="#ef4444" stroke-width="1.5" />
+              </g>
+              <template v-if="activePoint">
+                <line :x1="activePoint.x" :x2="activePoint.x" :y1="0" :y2="sparkline.H" stroke="#e2e8f0" stroke-opacity="0.35" stroke-width="1" stroke-dasharray="4 4" vector-effect="non-scaling-stroke" />
+                <circle :cx="activePoint.x" :cy="activePoint.y" :r="pinIdx !== null ? 4.5 : 4" :fill="activePoint.fail ? '#ef4444' : '#22c55e'" stroke="#fff" stroke-width="1.5" vector-effect="non-scaling-stroke" />
+              </template>
+            </svg>
+
+            <!-- 悬浮提示:与延迟趋势页 / 90 天可用性条共用 .hover-tip 外观 -->
+            <div v-if="activePoint" class="hover-tip absolute"
+              :class="[activePoint.y < 40 ? 'tip-arrow-up' : 'tip-arrow-down', pinIdx !== null ? 'is-pinned' : '']" :style="tooltipStyle">
+              <p class="text-slate-400">{{ formatDateTime(activePoint.t) }}</p>
+              <p class="font-semibold" :class="latencyTipClass(activePoint.l)">{{ activePoint.l }}ms</p>
+            </div>
+          </div>
         </div>
 
         <!-- 日志表格 -->
@@ -53,7 +76,7 @@
             </thead>
             <tbody class="divide-y divide-slate-700/50">
               <tr v-for="log in logs" :key="log.id" class="hover:bg-white/5 transition">
-                <td class="px-6 py-3 text-xs text-slate-400 whitespace-nowrap">{{ formatDateFull(log.created_at) }}</td>
+                <td class="px-6 py-3 text-xs font-mono text-slate-400 whitespace-nowrap">{{ formatDateTime(log.created_at) }}</td>
                 <td class="px-6 py-3 text-xs font-mono"><span :class="log.status_code >= 200 && log.status_code < 300 ? 'text-green-600' : 'text-red-600'">{{ log.status_code || '-' }}</span></td>
                 <td class="px-6 py-3 text-xs font-mono text-slate-400">{{ log.latency }}ms</td>
                 <td class="px-6 py-3 text-xs">
@@ -77,7 +100,75 @@
 </template>
 
 <script setup>
-import { formatDateFull } from '../../utils/format';
-defineProps({ monitor: Object, logs: Array, logsLoading: Boolean, hasMoreLogs: Boolean, sparkline: Object, uptimeStats: Object, latencyPercentiles: Object });
+import { ref, computed } from 'vue';
+import { formatDateTime, latencyTipClass } from '../../utils/format';
+
+const props = defineProps({ monitor: Object, logs: Array, logsLoading: Boolean, hasMoreLogs: Boolean, sparkline: Object, uptimeStats: Object, latencyPercentiles: Object });
 defineEmits(['close', 'load-more']);
+
+/* ---- 延迟趋势图交互:悬停查看、点击固定、方向键切换 ---- */
+const hoverIdx = ref(null);
+const pinIdx = ref(null);
+const activeIdx = computed(() => pinIdx.value ?? hoverIdx.value);
+const chartPoints = computed(() => props.sparkline?.points || []);
+const activePoint = computed(() => {
+    const idx = activeIdx.value;
+    const pts = chartPoints.value;
+    if (idx === null || idx === undefined || idx < 0 || idx >= pts.length) return null;
+    return pts[idx];
+});
+
+const nearestIdx = (clientX, el) => {
+    const pts = chartPoints.value;
+    if (!pts.length || !el || !props.sparkline) return null;
+    const rect = el.getBoundingClientRect();
+    if (!rect.width) return null;
+    const vx = ((clientX - rect.left) / rect.width) * props.sparkline.W;
+    let best = 0, bestDist = Infinity;
+    for (let i = 0; i < pts.length; i++) {
+        const d = Math.abs(pts[i].x - vx);
+        if (d < bestDist) { bestDist = d; best = i; }
+    }
+    return best;
+};
+
+const onChartPointer = (e) => { hoverIdx.value = nearestIdx(e.clientX, e.currentTarget); };
+const onChartLeave = () => { hoverIdx.value = null; };
+const onChartClick = (e) => {
+    const idx = nearestIdx(e.clientX, e.currentTarget);
+    if (idx === null) return;
+    hoverIdx.value = idx;
+    pinIdx.value = pinIdx.value === idx ? null : idx;
+};
+const onChartBlur = () => { hoverIdx.value = null; pinIdx.value = null; };
+const onChartKeydown = (e) => {
+    const pts = chartPoints.value;
+    if (!pts.length) return;
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+        e.preventDefault();
+        const cur = activeIdx.value ?? pts.length - 1;
+        const next = Math.min(Math.max(cur + (e.key === 'ArrowRight' ? 1 : -1), 0), pts.length - 1);
+        hoverIdx.value = next;
+        pinIdx.value = next;
+    } else if (e.key === 'Escape') {
+        hoverIdx.value = null;
+        pinIdx.value = null;
+    }
+};
+
+/** 提示框定位:贴近数据点,靠近左右边缘时贴边,点位偏上时翻到下方(箭头随之换向) */
+const tooltipStyle = computed(() => {
+    const p = activePoint.value;
+    const sp = props.sparkline;
+    if (!p || !sp) return {};
+    const xPct = (p.x / sp.W) * 100;
+    const shiftX = xPct < 12 ? '0' : xPct > 88 ? '-100%' : '-50%';
+    const shiftY = p.y < 40 ? '12px' : 'calc(-100% - 12px)';
+    return {
+        left: `${xPct}%`,
+        top: `${p.y}px`,
+        transform: `translate(${shiftX}, ${shiftY})`,
+        '--tip-arrow-x': shiftX === '0' ? '12px' : shiftX === '-100%' ? 'calc(100% - 12px)' : '50%',
+    };
+});
 </script>

@@ -22,7 +22,7 @@ const normalizeDate = (str) => {
     return str;
 };
 
-const getTz = () => localStorage.getItem('monitorflare_tz') || 'UTC';
+const getTz = () => localStorage.getItem('monitorflare_tz') || 'Asia/Shanghai';
 
 /** 相对时间(按当前语言本地化) */
 export const formatDate = (str) => {
@@ -36,6 +36,9 @@ export const formatDate = (str) => {
     return date.tz(getTz()).format('HH:mm');
 };
 
+/** 当前时间(完整年月日时分秒,按用户时区) */
+export const formatNow = () => dayjs().tz(getTz()).format('YYYY-MM-DD HH:mm:ss');
+
 /** 完整日期时间(按用户时区) */
 export const formatDateFull = (str) => {
     const s = normalizeDate(str);
@@ -43,6 +46,15 @@ export const formatDateFull = (str) => {
     const date = dayjs(s);
     if (!date.isValid()) return '-';
     return date.tz(getTz()).format('MM-DD HH:mm:ss');
+};
+
+/** 完整日期时间(含年份,按用户时区) */
+export const formatDateTime = (str) => {
+    const s = normalizeDate(str);
+    if (!s) return '-';
+    const date = dayjs(s);
+    if (!date.isValid()) return '-';
+    return date.tz(getTz()).format('YYYY-MM-DD HH:mm:ss');
 };
 
 /** 证书/域名剩余天数 */
@@ -89,7 +101,23 @@ export const formatExpiry = (dateStr) => {
     return `${days}d`;
 };
 
-/** 延迟颜色分级 */
+/** 延迟:仅文字颜色分级(纯文字场景用,与 latencyClass 的文字部分一致) */
+export const latencyTextClass = (ms) => {
+    if (ms < 100) return 'text-emerald-600 dark:text-emerald-300';
+    if (ms < 300) return 'text-sky-600 dark:text-sky-300';
+    if (ms < 800) return 'text-yellow-600 dark:text-yellow-300';
+    return 'text-red-600 dark:text-red-300';
+};
+
+/** 提示框内的延迟配色:框恒为深色底,统一取 400 档亮色(延迟趋势图 / 日志弹窗共用) */
+export const latencyTipClass = (ms) => {
+    if (ms < 100) return 'text-emerald-400';
+    if (ms < 300) return 'text-sky-400';
+    if (ms < 800) return 'text-yellow-400';
+    return 'text-red-400';
+};
+
+/** 延迟颜色分级(徽章:文字 + 背景 + 边框) */
 export const latencyClass = (ms) => {
     if (ms < 100) return 'text-emerald-600 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-500/10 border-emerald-200 dark:border-emerald-500/20';
     if (ms < 300) return 'text-sky-600 dark:text-sky-300 bg-sky-50 dark:bg-sky-500/10 border-sky-200 dark:border-sky-500/20';

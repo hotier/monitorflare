@@ -8,8 +8,16 @@
   </div>
 
   <router-view />
+
+  <!-- 全局确认弹窗:所有「删除 / 退出」类操作统一走它,见 composables/useConfirm.js -->
+  <ConfirmDialog v-if="confirmState.show" :message="confirmState.message" :confirmText="confirmState.confirmText"
+    @confirm="resolveConfirm(true)" @cancel="resolveConfirm(false)" />
 </template>
 
 <script setup>
-// App.vue — 根组件，只负责背景和路由出口
+// App.vue — 根组件，只负责背景、路由出口和全局确认弹窗
+import { useConfirm } from './composables/useConfirm';
+import ConfirmDialog from './components/admin/ConfirmDialog.vue';
+
+const { confirmState, resolveConfirm } = useConfirm();
 </script>

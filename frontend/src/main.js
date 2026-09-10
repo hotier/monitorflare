@@ -7,23 +7,9 @@ import utc from 'dayjs/plugin/utc';
 import timezone from 'dayjs/plugin/timezone';
 import relativeTime from 'dayjs/plugin/relativeTime';
 import 'dayjs/locale/zh-cn';
-import 'dayjs/locale/zh-tw';
-import 'dayjs/locale/ja';
-import 'dayjs/locale/ko';
-import 'dayjs/locale/de';
-import 'dayjs/locale/fr';
-import 'dayjs/locale/it';
-import 'dayjs/locale/es';
 
 import en from './locales/en.json';
 import zh from './locales/zh.json';
-import zhTw from './locales/zh-tw.json';
-import ja from './locales/ja.json';
-import ko from './locales/ko.json';
-import de from './locales/de.json';
-import fr from './locales/fr.json';
-import it from './locales/it.json';
-import es from './locales/es.json';
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -32,31 +18,34 @@ dayjs.extend(relativeTime);
 // 从 localStorage 读取语言偏好,默认跟随浏览器
 function detectLocale() {
   const saved = localStorage.getItem('monitorflare_lang');
-  if (saved) return saved;
+  if (saved === 'en' || saved === 'zh') return saved;
   const nav = (navigator.language || 'en').toLowerCase();
-  const supported = ['en', 'zh', 'zh-tw', 'ja', 'ko', 'de', 'fr', 'it', 'es'];
-  if (/^zh[-_](tw|hk|mo|hant)/.test(nav)) return 'zh-tw';
-  const base = nav.slice(0, 2);
-  return supported.includes(base) ? base : 'en';
+  return nav.startsWith('zh') ? 'zh' : 'en';
 }
+
+// dayjs 语言映射(相对时间等本地化)
+const DAYJS_LOCALES = { en: 'en', zh: 'zh-cn' };
+const applyDayjsLocale = (lang) => dayjs.locale(DAYJS_LOCALES[lang] || 'en');
 
 const i18n = createI18n({
   legacy: false,
   locale: detectLocale(),
   fallbackLocale: 'en',
-  messages: { en, zh, 'zh-tw': zhTw, ja, ko, de, fr, it, es },
+  messages: { en, zh },
 });
 
-// 全局时区(默认 UTC,可在设置中修改)
-const storedTz = localStorage.getItem('monitorflare_tz') || 'UTC';
+// 初始化时同步 dayjs 语言,否则回访用户(已存偏好/浏览器中文)相对时间仍是英文
+applyDayjsLocale(i18n.global.locale.value);
+
+// 全局时区(默认上海时区,可在设置中修改)
+const storedTz = localStorage.getItem('monitorflare_tz') || 'Asia/Shanghai';
 dayjs.tz.setDefault(storedTz);
 
 // 导出切换语言/时区的辅助函数
 export function setAppLanguage(lang) {
   i18n.global.locale.value = lang;
   localStorage.setItem('monitorflare_lang', lang);
-  const dayjsLocale = { en: 'en', zh: 'zh-cn', 'zh-tw': 'zh-tw', ja: 'ja', ko: 'ko', de: 'de', fr: 'fr', it: 'it', es: 'es' }[lang] || 'en';
-  dayjs.locale(dayjsLocale);
+  applyDayjsLocale(lang);
 }
 
 export function setAppTimezone(tz) {
@@ -65,7 +54,7 @@ export function setAppTimezone(tz) {
 }
 
 export function getAppTimezone() {
-  return localStorage.getItem('monitorflare_tz') || 'UTC';
+  return localStorage.getItem('monitorflare_tz') || 'Asia/Shanghai';
 }
 
 import '@fontsource/jetbrains-mono/latin-400.css';

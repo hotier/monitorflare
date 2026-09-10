@@ -49,7 +49,7 @@ async function performMonitorCheck(monitor: Monitor, env: Bindings) {
   // 状态机: 连续失败计数 → 告警
   const afterFailures = Math.max(1, monitor.alert_after_failures || 1);
   const lang = isSupportedLang(await getSetting(env, 'language'));
-  const tz = await getSetting(env, 'timezone') || 'UTC';
+  const tz = await getSetting(env, 'timezone') || 'Asia/Shanghai';
 
   if (!result.ok) {
     const newRetry = (monitor.retry_count || 0) + 1;

@@ -47,17 +47,17 @@
       <div v-if="allUp && !hasRetrying" class="relative mt-5 pt-4 border-t border-emerald-200/70 dark:border-emerald-500/10 grid grid-cols-3 gap-4">
         <div>
           <p class="text-[11px] text-slate-500 dark:text-slate-500 mb-1">{{ $t('hero.monitors') }}</p>
-          <p class="text-2xl font-bold text-slate-900 dark:text-white">{{ activeMonitors.length }}</p>
+          <p class="text-2xl font-bold font-mono text-slate-900 dark:text-white">{{ activeMonitors.length }}</p>
         </div>
         <div>
           <p class="text-[11px] text-slate-500 dark:text-slate-500 mb-1">{{ $t('hero.currentUp') }}</p>
-          <p class="text-2xl font-bold text-emerald-500 dark:text-emerald-400">
+          <p class="text-2xl font-bold font-mono text-emerald-500 dark:text-emerald-400">
             {{ activeMonitors.length > 0 ? Math.round(activeMonitors.filter(m => m.status === 'UP').length / activeMonitors.length * 100) : 0 }}%
           </p>
         </div>
         <div>
           <p class="text-[11px] text-slate-500 dark:text-slate-500 mb-1">{{ $t('hero.avgLatency') }}</p>
-          <p class="text-2xl font-bold text-slate-900 dark:text-white">{{ avgLatency != null ? avgLatency + 'ms' : '-' }}</p>
+          <p class="text-2xl font-bold font-mono" :class="avgLatencyClass">{{ avgLatency != null ? avgLatency + 'ms' : '-' }}</p>
         </div>
       </div>
     </div>
@@ -78,6 +78,7 @@
 <script setup>
 import { computed } from 'vue';
 import { useI18n } from 'vue-i18n';
+import { latencyTextClass } from '../../utils/format';
 
 const props = defineProps({
     monitors:       { type: Array,   required: true },
@@ -153,4 +154,9 @@ const cfg = computed(() => {
         badge: t(base.badgeKey),
     };
 });
+
+/** 平均延迟配色:与监控卡片的延迟徽章同一套分级(<100 绿 / <300 蓝 / <800 黄 / 其余红) */
+const avgLatencyClass = computed(() =>
+    props.avgLatency != null ? latencyTextClass(props.avgLatency) : 'text-slate-900 dark:text-white'
+);
 </script>

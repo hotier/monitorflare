@@ -8,9 +8,9 @@ const TODAY = '2024-03-05';
 /** 只关心 key 与插值参数，不引入完整 i18n 实例 */
 const $t = (key, params) => (params ? `${key}|${JSON.stringify(params)}` : key);
 
-const mountBar = (monitor) =>
+const mountBar = (monitor, days) =>
   mount(UptimeBar, {
-    props: { monitor },
+    props: days ? { monitor, days } : { monitor },
     global: { mocks: { $t } },
   });
 
@@ -30,6 +30,31 @@ describe('UptimeBar', () => {
     expect(cells(mountBar({ daily_stats: [] })).length).toBe(90);
   });
 
+  it('按 days 窗口渲染对应格子数', () => {
+    expect(cells(mountBar({ daily_stats: [] }, 7)).length).toBe(7);
+    expect(cells(mountBar({ daily_stats: [] }, 30)).length).toBe(30);
+    expect(cells(mountBar({ daily_stats: [] }, 90)).length).toBe(90);
+  });
+
+  it('窗口大于监控历史时,只有创建日之后的格子渲染色块', () => {
+    const wrapper = mountBar({ daily_stats: [], created_at: '2024-03-03' }, 7);
+
+    expect(cells(wrapper).length).toBe(7);
+    expect(wrapper.findAll('.uptime-bar-fill').length).toBe(3);
+  });
+
+  it('今天刚添加时,当天绿条贴在最左边第一格', () => {
+    const wrapper = mountBar({ daily_stats: [{ date: TODAY, up: 1, total: 1 }], created_at: TODAY }, 7);
+
+    expect(cells(wrapper).length).toBe(7);
+    expect(cells(wrapper)[0].find('.uptime-bar-fill').exists()).toBe(true);
+    expect(wrapper.findAll('.uptime-bar-fill').length).toBe(1);
+  });
+
+  it('左侧文案带窗口天数', () => {
+    expect(mountBar({ daily_stats: [] }, 7).html()).toContain('"days":7');
+  });
+
   it('日期按时间升序，最后一格是今天', () => {
     const wrapper = mountBar({ daily_stats: [] });
     const tooltips = wrapper.findAll('.uptime-tooltip').map((n) => n.text());
@@ -42,7 +67,7 @@ describe('UptimeBar', () => {
     const wrapper = mountBar({ daily_stats: [] });
     const last = cells(wrapper)[89];
 
-    expect(last.classes()).toContain('bg-slate-200/80');
+    expect(last.find('.uptime-bar-fill').classes()).toContain('bg-slate-200/80');
     expect(last.text()).toContain('uptimeBar.noData');
   });
 
@@ -63,40 +88,24 @@ describe('UptimeBar', () => {
 
     for (const [stat, expected] of cases) {
       const wrapper = mountBar({ daily_stats: [{ date: TODAY, ...stat }] });
-      expect(cells(wrapper)[89].classes()).toContain(expected);
+      expect(cells(wrapper)[89].find('.uptime-bar-fill').classes()).toContain(expected);
     }
   });
 
   it('总数为 0 的日期按无数据渲染', () => {
     const wrapper = mountBar({ daily_stats: [{ date: TODAY, up: 0, total: 0 }] });
-    expect(cells(wrapper)[89].classes()).toContain('bg-slate-200/80');
-  });
-
-  it('缺失 uptime_30d 时不显示 30 天可用率', () => {
-    const wrapper = mountBar({ daily_stats: [] });
-    expect(wrapper.html()).not.toContain('uptimeBar.last30d');
-  });
-
-  it('展示 uptime_30d 并按阈值着色', () => {
-    const cases = [
-      [99.95, 'text-emerald-500'],
-      [96, 'text-yellow-500'],
-      [90, 'text-red-500'],
-    ];
-
-    for (const [pct, expected] of cases) {
-      const wrapper = mountBar({ daily_stats: [], uptime_30d: pct });
-      const el = wrapper.findAll('span').find((n) => n.text().includes('uptimeBar.last30d'));
-
-      expect(el).toBeTruthy();
-      expect(el.classes()).toContain(expected);
-      expect(el.text()).toContain(String(pct));
-    }
+    expect(cells(wrapper)[89].find('.uptime-bar-fill').classes()).toContain('bg-slate-200/80');
   });
 
   it('始终渲染底部说明文案', () => {
     const wrapper = mountBar({ daily_stats: [] });
     expect(wrapper.html()).toContain('uptimeBar.daysAgo');
-    expect(wrapper.html()).toContain('uptimeBar.yesterday');
+    expect(wrapper.html()).toContain('uptimeBar.today');
+  });
+
+  it('底部只标窗口端点,不再显示 30 天可用率', () => {
+    const wrapper = mountBar({ daily_stats: [], uptime_30d: 99.95 });
+    expect(wrapper.html()).not.toContain('uptimeBar.last30d');
+    expect(wrapper.html()).toContain('uptimeBar.daysAgo');
   });
 });

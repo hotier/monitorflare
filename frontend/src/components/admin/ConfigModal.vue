@@ -30,7 +30,7 @@
               <div class="grid grid-cols-2 gap-3">
                 <div>
                   <label class="block text-xs font-medium text-slate-400 mb-1">{{ $t('configModal.method') }}</label>
-                  <select v-model="configForm.method" class="w-full border border-slate-700 rounded-lg px-3 py-2 text-sm bg-slate-800/80 text-white focus:border-green-500 outline-none"><option value="GET">GET</option><option value="POST">POST</option><option value="HEAD">HEAD</option><option value="PUT">PUT</option></select>
+                  <AppSelect v-model="configForm.method" :options="httpMethods" variant="field-sm" />
                 </div>
                 <div><label class="block text-xs font-medium text-slate-400 mb-1">{{ $t('configModal.tags') }}</label><input v-model="configForm.tags" placeholder="prod,web,api" class="w-full border border-slate-700 rounded-lg px-3 py-2 text-sm bg-slate-800/80 text-white focus:border-green-500 outline-none placeholder-slate-600"></div>
               </div>
@@ -42,8 +42,16 @@
           <div>
             <h4 class="text-xs font-bold uppercase tracking-wider text-slate-400 mb-3">{{ $t('configModal.detection') }}</h4>
             <div class="space-y-3">
-              <label class="flex items-center justify-between p-3 rounded-lg bg-slate-900/50 cursor-pointer"><div class="flex items-center gap-2 text-sm text-slate-300"><i class="fas fa-lock text-blue-400 w-4"></i><span>{{ $t('configModal.sslCheck') }}</span></div><input type="checkbox" v-model="configForm.check_ssl" class="w-4 h-4 rounded accent-green-500"></label>
-              <label class="flex items-center justify-between p-3 rounded-lg bg-slate-900/50 cursor-pointer"><div class="flex items-center gap-2 text-sm text-slate-300"><i class="fas fa-globe text-green-400 w-4"></i><span>{{ $t('configModal.domainCheck') }}</span></div><input type="checkbox" v-model="configForm.check_domain" class="w-4 h-4 rounded accent-green-500"></label>
+              <label class="flex items-center justify-between gap-4 p-3 rounded-lg bg-slate-900/50 cursor-pointer">
+                <div class="flex items-center gap-2 text-sm text-slate-300"><i class="fas fa-lock text-blue-400 w-4"></i><span>{{ $t('configModal.sslCheck') }}</span></div>
+                <input type="checkbox" v-model="configForm.check_ssl" class="switch-input">
+                <span class="switch-track"><span class="switch-thumb"></span></span>
+              </label>
+              <label class="flex items-center justify-between gap-4 p-3 rounded-lg bg-slate-900/50 cursor-pointer">
+                <div class="flex items-center gap-2 text-sm text-slate-300"><i class="fas fa-globe text-green-400 w-4"></i><span>{{ $t('configModal.domainCheck') }}</span></div>
+                <input type="checkbox" v-model="configForm.check_domain" class="switch-input">
+                <span class="switch-track"><span class="switch-thumb"></span></span>
+              </label>
             </div>
           </div>
           <!-- 监测频率 -->
@@ -62,7 +70,7 @@
             <h4 class="text-xs font-bold uppercase tracking-wider text-slate-400 mb-3">{{ $t('configModal.alertFrequency') }}</h4>
             <p class="text-xs text-slate-500 mb-4">{{ $t('configModal.alertHint') }}</p>
             <div class="mb-5 pb-4 border-b border-slate-700/50">
-              <div class="flex items-center gap-2 text-xs text-slate-400 mb-2"><i class="fas fa-exclamation-triangle text-orange-400 w-3"></i><span>{{ $t('configModal.errorRate') }}</span></div>
+              <div class="flex items-center gap-2 text-sm font-medium text-slate-300 mb-2"><i class="fas fa-exclamation-triangle text-orange-400 w-3"></i><span>{{ $t('configModal.errorRate') }}</span></div>
               <div class="flex items-center justify-between bg-slate-900/50 p-3 rounded-lg border border-slate-700">
                 <div class="text-xs text-slate-500 mr-2 flex-1">{{ $t('configModal.errorRateHint') }}</div>
                 <div class="flex items-center gap-2 shrink-0">
@@ -73,7 +81,7 @@
             </div>
             <div class="space-y-4">
               <div v-for="item in silenceItems" :key="item.key">
-                <div class="flex items-center gap-2 text-xs text-slate-400 mb-2"><i :class="item.icon + ' w-3'"></i><span>{{ item.label }}</span></div>
+                <div class="flex items-center gap-2 text-sm font-medium text-slate-300 mb-2"><i :class="item.icon + ' w-3'"></i><span>{{ item.label }}</span></div>
                 <div class="grid grid-cols-5 gap-1.5">
                   <label v-for="opt in silenceOptions" :key="opt.value"
                     class="flex flex-col items-center justify-center py-2 rounded-lg border-2 cursor-pointer transition-all text-center"
@@ -98,10 +106,13 @@
 
 <script setup>
 import { useI18n } from 'vue-i18n';
+import AppSelect from '../common/AppSelect.vue';
+
 defineProps({ configTarget: Object, configForm: Object, configSaving: Boolean });
 defineEmits(['close', 'save']);
 
 const { t } = useI18n();
+const httpMethods = ['GET', 'POST', 'HEAD', 'PUT'].map(v => ({ value: v, label: v }));
 const silenceOptions = [{ value: 1, label: '1h' }, { value: 4, label: '4h' }, { value: 12, label: '12h' }, { value: 24, label: '24h' }, { value: 72, label: '72h' }];
 const silenceItems = [
     { key: 'alert_silence_uptime', label: t('configModal.alertUptime'), icon: 'fas fa-heartbeat text-red-400' },

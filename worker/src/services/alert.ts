@@ -66,7 +66,7 @@ export async function checkErrorRate(env: Bindings, monitor: Monitor, lang: Lang
 /** 证书 / 域名到期告警(每 2 小时) */
 export async function checkExpiryAlerts(env: Bindings) {
   const lang = isSupportedLang(await getSetting(env, 'language'));
-  const tz = await getSetting(env, 'timezone') || 'UTC';
+  const tz = await getSetting(env, 'timezone') || 'Asia/Shanghai';
   const { results } = await env.DB.prepare(`
     SELECT ${MONITOR_COLUMNS} FROM monitors WHERE paused = 0 AND type = 'http' AND (check_ssl = 1 OR check_domain = 1)
   `).all<Monitor>();

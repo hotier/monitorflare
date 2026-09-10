@@ -25,6 +25,7 @@
     "addFailed": "Add failed",
     "configSaved": "Configuration saved",
     "deleteConfirm": "Are you sure you want to delete \"{name}\"?",
+    "logoutConfirm": "Are you sure you want to log out?",
     "saving": "Saving...",
     "all": "All",
     "none": "None",
@@ -35,6 +36,15 @@
     "uptime": "Uptime",
     "actions": "Actions",
     "type": "Type"
+  },
+  "dateTimePicker": {
+    "placeholder": "Select date & time",
+    "startPlaceholder": "Start date",
+    "endPlaceholder": "End date",
+    "time": "Time",
+    "today": "Today",
+    "now": "Now",
+    "ok": "OK"
   },
   "statusPage": {
     "serviceStatus": "Service Status",
@@ -101,9 +111,8 @@
   },
   "uptimeBar": {
     "noData": "No data",
-    "daysAgo": "90 days ago",
-    "last30d": "Last 30 days: {pct}%",
-    "yesterday": "Yesterday"
+    "daysAgo": "{days} days ago",
+    "today": "Today"
   },
   "footer": {
     "refresh": "Refresh data",
@@ -116,12 +125,9 @@
   },
   "login": {
     "title": "Admin Console",
-    "subtitle": "Enter the admin password to manage monitoring",
     "passwordPlaceholder": "Enter admin password",
     "verifying": "Verifying...",
     "enter": "Sign in",
-    "protectedArea": "Protected area",
-    "sessionLogin": "Session login",
     "backToStatus": "Back to status page",
     "notConfigured": "Admin password not configured",
     "wrongPassword": "Incorrect password",
@@ -155,6 +161,7 @@
     "addFirstMonitor": "Add your first monitor",
     "loadFailed": "Data load failed ({status})",
     "fillNameUrl": "Please fill in name and URL",
+    "invalidPort": "Port must be an integer between 1 and 65535",
     "monitorAdded": "Monitor added",
     "deleted": "Deleted: {name}",
     "updated": "Updated: {name}",
@@ -163,6 +170,7 @@
     "saved": "Configuration saved",
     "batchConfirm": "Delete {count} monitors in batch?",
     "batchSuccess": "Success, {count} items affected",
+    "batchRefreshed": "Refreshed {count} monitors",
     "batchFailed": "Batch operation failed",
     "orderSaved": "Order saved",
     "orderSaveFailed": "Failed to save order",
@@ -180,6 +188,7 @@
     "bulkPause": "Pause",
     "bulkResume": "Resume",
     "bulkDelete": "Delete",
+    "bulkRefresh": "Refresh",
     "apiKeys": "API Keys",
     "backup": "Backup",
     "restore": "Restore",
@@ -260,6 +269,7 @@
     "unknownChannel": "Unknown channel",
     "customChannel": "Custom notification channel",
     "fillName": "Please enter a channel name",
+    "fillConfig": "Please fill in the required fields for this channel type",
     "updated": "Channel updated",
     "added": "Channel added",
     "operationFailed": "Operation failed",
@@ -445,7 +455,6 @@
   },
   "settings": {
     "title": "Site settings",
-    "subtitle": "Branding, language, timezone and theme",
     "siteTitle": "Site title",
     "siteDescription": "Site description",
     "logoUrl": "Logo URL",
@@ -497,6 +506,7 @@
     "visibilityPrivateHint": "Requires password to view",
     "statusPassword": "Access password",
     "statusPasswordOptional": "(leave empty to keep current)",
+    "statusPasswordNeeded": "Required",
     "statusPasswordPlaceholder": "Enter a password",
     "statusPasswordHint": "Stored as SHA-256 hash. Changing it logs out all visitors.",
     "statusPasswordRequired": "Password is required for private mode"
@@ -531,8 +541,11 @@
     "lastUsed": "last used {time}",
     "delete": "Delete",
     "deleted": "Key deleted",
+    "deleteConfirm": "Delete the key \"{name}\"?",
     "usageTitle": "Usage examples",
     "usageHint": "Use the key as Bearer token to call the API endpoints.",
+    "usageExpand": "Show usage examples",
+    "usageCollapse": "Hide usage examples",
     "usageComment1": "List all monitors (full fields)",
     "usageComment2": "Query check logs (pagination + time filter)",
     "usageComment3": "All incidents",
@@ -590,14 +603,7 @@
   },
   "languages": {
     "en": "English",
-    "zh": "中文",
-    "ja": "日本語",
-    "ko": "한국어",
-    "de": "Deutsch",
-    "fr": "Français",
-    "it": "Italiano",
-    "es": "Español",
-    "zh-tw": "繁體中文"
+    "zh": "中文"
   },
   "date": {
     "m": "{n}m ago",
@@ -638,9 +644,10 @@
     "sslExpiry": "SSL {days} · {date}",
     "domainExpiry": "Domain {days} · {date}",
     "sslChecked": "SSL checked",
-    "uptime90": "Uptime (90 days)",
+    "uptimeWindow": "Uptime (last {days} days)",
     "latencyTrend": "Latency trend",
-    "now": "now",
+    "chartHint": "Hover to inspect · click to pin · arrow keys to step · Esc to clear",
+    "pinned": "Pinned",
     "noData": "No data available yet",
     "recentChecks": "Recent checks",
     "recentChecksCount": "{count} records",
@@ -664,7 +671,8 @@
     "stat90d": "90 days",
     "range24h": "24h",
     "range7d": "7d",
-    "range30d": "30d"
+    "range30d": "30d",
+    "range90d": "90d"
   },
   "statusLock": {
     "hint": "This status page is private. Enter the password to continue.",
@@ -674,6 +682,7 @@
     "wrongPassword": "Incorrect password",
     "notConfigured": "Status page password is not configured yet",
     "requestFailed": "Request failed, please retry",
-    "logout": "Logout"
+    "logout": "Logout",
+    "logoutConfirm": "Log out of the status page? You will need to enter the password again."
   }
 }

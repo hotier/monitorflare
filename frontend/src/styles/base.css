@@ -7,9 +7,14 @@
    整合状态页和后台的共享 CSS
    ==================================================================== */
 
-/* ── 字体 ── */
+/* ── 字体 ──
+   等宽栈:英文/数字用 JetBrains Mono,中文回落到中文无衬线字体(避免落到系统等宽宋体)
+── */
 :root, html, body { font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif; }
-.font-mono { font-family: 'JetBrains Mono', monospace; }
+.font-mono { font-family: 'JetBrains Mono', 'PingFang SC', 'Microsoft YaHei', monospace; }
+
+/* 表单控件:英文与数字统一使用等宽字体(中文自动回落) */
+input, textarea, select { font-family: 'JetBrains Mono', 'PingFang SC', 'Microsoft YaHei', monospace; }
 
 /* ── 背景 ── */
 body { background: #f8fafc; transition: background 0.5s ease, color 0.5s ease; }
@@ -145,10 +150,6 @@ html:not(.dark) ::-webkit-scrollbar-thumb:hover { background:#94a3b8; }
 .sparkline-area { opacity: 0.1; }
 .dark .sparkline-area { opacity: 0.2; }
 
-/* ── 延迟徽章 ── */
-.latency-badge { transition: transform 0.2s, box-shadow 0.2s; }
-.latency-badge:hover { transform: scale(1.08); box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
-
 /* ── 主题按钮 ── */
 .theme-btn { transition: transform 0.4s cubic-bezier(0.34,1.56,0.64,1); }
 .theme-btn:active { transform: scale(0.85) rotate(15deg); }
@@ -158,24 +159,72 @@ html:not(.dark) ::-webkit-scrollbar-thumb:hover { background:#94a3b8; }
 .refresh-spin { animation: spin-once 0.6s ease-in-out; }
 
 /* ── 90天可用性条 ── */
-.uptime-bar-cell { position: relative; transition: transform 0.15s, filter 0.15s; cursor: default; }
-.uptime-bar-cell:hover { transform: scaleY(1.8) scaleX(1.4); z-index: 10; filter: brightness(1.15); }
-.uptime-tooltip {
-    position: absolute; bottom: calc(100% + 8px); left: 50%; transform: translateX(-50%);
-    padding: 5px 10px; border-radius: 8px; font-size: 10px; font-family: 'JetBrains Mono', monospace;
-    white-space: nowrap; pointer-events: none; opacity: 0; visibility: hidden; transition: opacity 0.2s, visibility 0.2s; z-index: 20;
-    background: #0f172a; color: #e2e8f0; border: 1px solid rgba(255,255,255,0.08);
+.uptime-bar-track {
+    /* 整行恒按 90 格排版:切换窗口只改变"可见条数",单根条宽度不变 */
+    --bar-slots: 90;
+    --bar-gap: 1.5px;
+    display: flex; justify-content: flex-start; gap: var(--bar-gap);
+}
+.uptime-bar-cell {
+    /* --bar-h 是色块静止时的高度;放大用 scaleY(1.8) 且以底边为原点 → 只向上探 0.8h,不向下压到下方内容 */
+    --bar-h: 18px;
+    --bar-lift: calc(var(--bar-h) * 0.8);
+    /* 固定占 1/90 行宽,不随窗口天数拉伸;窗口内不足 90 格时贴左排,右边留白 */
+    flex: 0 0 auto;
+    width: calc((100% - (var(--bar-slots) - 1) * var(--bar-gap)) / var(--bar-slots));
+    position: relative; height: var(--bar-h); cursor: default;
+}
+/* 悬停放大只作用于内层色块:若放大外层格子,tooltip 作为子元素会被 scale 一起拉伸(框变大、字变扁) */
+.uptime-bar-fill {
+    display: block; width: 100%; height: 100%; border-radius: 2px;
+    transition: transform 0.15s, filter 0.15s;
+}
+.uptime-bar-cell:hover .uptime-bar-fill {
+    position: relative; z-index: 10; transform-origin: center bottom;
+    transform: scaleY(1.8) scaleX(1.4); filter: brightness(1.15);
+}
+
+/* ── 共享悬浮提示(90天条 / 延迟趋势共用同一套外观) ──
+   恒为「黑底白字」的深色浮层:它是浮在页面之上的独立层,不跟随站点主题。 */
+.hover-tip {
+    padding: 5px 10px; border-radius: 8px; line-height: 1.45;
+    font-size: 10px; font-family: 'JetBrains Mono', monospace;
+    white-space: nowrap; pointer-events: none; z-index: 20;
+    background: #000; color: #fff; border: 1px solid rgba(255,255,255,0.14);
     box-shadow: 0 8px 24px rgba(0,0,0,0.4);
 }
-.uptime-tooltip::after {
-    content: ''; position: absolute; top: 100%; left: 50%; transform: translateX(-50%);
-    border: 4px solid transparent; border-top-color: #0f172a;
+/* 箭头默认对准框正中;定位方可用 --tip-arrow-x 把它挪向被指向的那个点 */
+.hover-tip::after {
+    content: ''; position: absolute; left: var(--tip-arrow-x, 50%); transform: translateX(-50%);
+    border: 4px solid transparent;
 }
-.uptime-bar-cell:nth-child(-n+20) .uptime-tooltip { left: 0; transform: translateX(0); }
-.uptime-bar-cell:nth-child(-n+20) .uptime-tooltip::after { left: 12px; transform: translateX(0); }
-.uptime-bar-cell:nth-last-child(-n+20) .uptime-tooltip { left: auto; right: 0; transform: translateX(0); }
-.uptime-bar-cell:nth-last-child(-n+20) .uptime-tooltip::after { left: auto; right: 12px; transform: translateX(0); }
-.uptime-bar-cell:hover .uptime-tooltip { opacity: 1; visibility: visible; }
+.hover-tip.tip-arrow-down::after { top: 100%; border-top-color: #000; }
+.hover-tip.tip-arrow-up::after { bottom: 100%; border-bottom-color: #000; }
+/* 后台弹窗浅色模式会把 text-slate-* / text-*-400 一律 !important 改写成深色,
+   那是为浅色弹窗正文准备的,套到黑底提示框上就成了"黑底深字"。这里按提示框
+   语境把色值声明回来(特异性比上面那批高,且同样 !important 才能赢)。 */
+html:not(.dark) .admin-modal .hover-tip { color: #fff !important; }
+html:not(.dark) .admin-modal .hover-tip .text-slate-400 { color: rgba(255,255,255,0.62) !important; }
+html:not(.dark) .admin-modal .hover-tip .text-emerald-400 { color: #34d399 !important; }
+html:not(.dark) .admin-modal .hover-tip .text-sky-400 { color: #38bdf8 !important; }
+html:not(.dark) .admin-modal .hover-tip .text-yellow-400 { color: #facc15 !important; }
+html:not(.dark) .admin-modal .hover-tip .text-red-400 { color: #f87171 !important; }
+/* 延迟趋势:点击固定住的点位,给提示框加一圈高亮(用自定义类而非 ring,免得 Tailwind 的 box-shadow 覆盖上面的阴影) */
+.hover-tip.is-pinned {
+    border-color: rgba(56,189,248,0.55);
+    box-shadow: 0 8px 24px rgba(0,0,0,0.4), 0 0 0 2px rgba(56,189,248,0.3);
+}
+
+/* 90天条:提示框恒定居中于格子、箭头朝下;允许溢出卡片,不做贴边翻转 */
+.uptime-tooltip {
+    position: absolute; bottom: calc(100% + 8px); left: 50%; transform: translateX(-50%);
+    opacity: 0; visibility: hidden; transition: opacity 0.2s, visibility 0.2s;
+}
+/* 悬停时色块顶端上探 0.8h,提示框跟着抬起同高,下方箭头才落在放大后的条顶上 */
+.uptime-bar-cell:hover .uptime-tooltip {
+    bottom: calc(100% + 8px + var(--bar-lift));
+    opacity: 1; visibility: visible;
+}
 
 /* ── Modal 弹入 ── */
 @keyframes modal-in {
@@ -249,18 +298,35 @@ html:not(.dark) .admin-modal select {
     color-scheme: light;
     box-shadow: inset 0 1px 2px rgba(15,23,42,0.04);
 }
+html:not(.dark) .admin-modal .app-select-trigger {
+    background-color: #ffffff !important;
+    border-color: #cbd5e1 !important;
+    color: #0f172a !important;
+    box-shadow: inset 0 1px 2px rgba(15,23,42,0.04);
+}
 html:not(.dark) .admin-modal input::placeholder,
 html:not(.dark) .admin-modal textarea::placeholder {
     color: #94a3b8 !important;
 }
+
+/* ── 原生日期/时间控件的弹窗卡片 ──
+   浅色分支已在上面显式声明 color-scheme: light; 深色分支完全没有声明，浏览器
+   会按 OS / UA 默认弹出白底日历/时钟面板，在深色弹窗里就是一张白卡片，
+   空值占位符也容易被 UA 用浅灰渲染在深底上。这里给两种主题各补一条，
+   让弹出的原生控件面板与当前主题一致。 */
+html:not(.dark) .admin-modal input:is([type="date"],[type="time"],[type="datetime-local"],[type="month"],[type="week"]) { color-scheme: light; }
+html.dark .admin-modal input:is([type="date"],[type="time"],[type="datetime-local"],[type="month"],[type="week"]) { color-scheme: dark; }
 html:not(.dark) .admin-modal input:not([type="checkbox"]):not([type="radio"]):not([type="file"]):focus,
 html:not(.dark) .admin-modal textarea:focus,
 html:not(.dark) .admin-modal select:focus {
     border-color: #22c55e !important;
     box-shadow: 0 0 0 3px rgba(34,197,94,0.14);
 }
-html:not(.dark) .admin-modal button.text-white,
-html:not(.dark) .admin-modal button.text-white *,
+/* 实心按钮(带 text-white 或 bg-*-600 底色)在浅色弹窗里仍需白字。
+   必须排除 AppSelect 触发器:它同样带 text-white,但浅色下背景是白/浅色,
+   文字若被这条规则强制成白色就会与背景重合(选择器特异性高于 .app-select-trigger)。 */
+html:not(.dark) .admin-modal button.text-white:not(.app-select-trigger),
+html:not(.dark) .admin-modal button.text-white:not(.app-select-trigger) *,
 html:not(.dark) .admin-modal button[class*="bg-"][class*="-600"],
 html:not(.dark) .admin-modal button[class*="bg-"][class*="-600"] * {
     color: #ffffff !important;
@@ -292,6 +358,7 @@ html:not(.dark) .tag-filter-btn { border-color: #e2e8f0; }
 
 /* ── 批量操作栏 (admin) ── */
 .bulk-bar { background:rgba(34,197,94,0.08); border:1px solid rgba(34,197,94,0.2); border-radius:12px; padding:8px 16px; display:flex; align-items:center; gap:12px; }
+html:not(.dark) .bulk-bar { background:rgba(34,197,94,0.12); border-color:rgba(34,197,94,0.35); }
 
 /* ── 迷你折线图 (admin) ── */
 .mini-sparkline { opacity: 0.7; transition: opacity 0.2s; }
@@ -312,6 +379,29 @@ html:not(.dark) .search-input:focus { border-color: #22c55e; }
 
 /* ── 折线图 (admin) ── */
 .sparkline-container svg { display: block; }
+
+/* ── 滑动开关 (admin:SSL / 域名到期检测) ──
+   用自定义类而不是 Tailwind 背景类:上面那批浅色模式的
+   [class*="bg-slate-..."] !important 改写只认 Tailwind 类名,认不得这里的轨道/滑块,
+   所以深浅两套配色由下面几行自己管,不会被弹窗主题改写规则打到。 */
+.switch-input { position: absolute; width: 1px; height: 1px; opacity: 0; margin: 0; pointer-events: none; }
+.switch-track {
+    position: relative; flex: 0 0 auto; box-sizing: border-box;
+    width: 38px; height: 22px; border-radius: 999px;
+    background: #334155; transition: background-color 0.2s ease, box-shadow 0.2s ease;
+}
+.switch-thumb {
+    position: absolute; top: 2px; left: 2px; width: 18px; height: 18px; border-radius: 999px;
+    background: #94a3b8; box-shadow: 0 1px 3px rgba(0,0,0,0.4);
+    transition: transform 0.2s ease, background-color 0.2s ease;
+}
+.switch-input:checked + .switch-track { background: #22c55e; }
+.switch-input:checked + .switch-track .switch-thumb { transform: translateX(16px); background: #fff; }
+.switch-input:focus-visible + .switch-track { box-shadow: 0 0 0 3px rgba(34,197,94,0.3); }
+/* 浅色模式:关闭态浅灰轨道 + 白色滑块,打开态仍是绿色 */
+html:not(.dark) .switch-track { background: #cbd5e1; }
+html:not(.dark) .switch-thumb { background: #fff; box-shadow: 0 1px 3px rgba(15,23,42,0.3); }
+html:not(.dark) .switch-input:focus-visible + .switch-track { box-shadow: 0 0 0 3px rgba(34,197,94,0.22); }
 
 /* ── 移动端适配 ── */
 @media (max-width: 640px) {

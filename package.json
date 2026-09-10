@@ -4,6 +4,10 @@
   "private": true,
   "description": "MonitorFlare 仓库级开发工具链（lint / format）。运行时代码在 frontend/ 与 worker/ 各自的 package.json 中。",
   "scripts": {
+    "setup": "node scripts/setup.mjs",
+    "dev": "concurrently -k -n worker,frontend -c blue,magenta \"npm run dev:worker\" \"npm run dev:frontend\"",
+    "dev:worker": "npm --prefix worker run dev",
+    "dev:frontend": "npm --prefix frontend run dev",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
@@ -11,6 +15,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.39.5",
+    "concurrently": "^10.0.5",
     "eslint": "^9.39.4",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-vue": "^10.11.0",

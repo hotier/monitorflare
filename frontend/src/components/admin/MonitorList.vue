@@ -8,9 +8,8 @@
             <i class="fas fa-search absolute left-2.5 top-1/2 -translate-y-1/2 text-[10px] text-slate-500"></i>
             <input :value="searchQuery" @input="$emit('update:searchQuery', $event.target.value)" type="text" :placeholder="$t('adminPage.searchPlaceholder')" class="search-input">
           </div>
-          <select :value="sortKey" @change="$emit('update:sortKey', $event.target.value)" class="text-[11px] h-8 bg-transparent border border-slate-300 dark:border-slate-700 text-slate-600 dark:text-slate-400 rounded-lg px-2 cursor-pointer focus:outline-none focus:border-green-500" style="appearance:none;-webkit-appearance:none">
-            <option value="">{{ $t('adminPage.sortDefault') }}</option><option value="name">{{ $t('adminPage.sortByName') }}</option><option value="status">{{ $t('adminPage.sortByStatus') }}</option><option value="latency">{{ $t('adminPage.sortByLatency') }}</option><option value="ssl">{{ $t('adminPage.sortBySsl') }}</option>
-          </select>
+          <AppSelect variant="compact" align="right" :model-value="sortKey" :options="sortOptions"
+            @update:model-value="v => $emit('update:sortKey', v)" />
           <span class="text-xs font-mono text-slate-500 dark:text-slate-600 shrink-0">{{ filteredMonitors.length }} / {{ monitors.length }}</span>
         </div>
       </div>
@@ -21,11 +20,12 @@
       </div>
       <!-- 批量操作栏 -->
       <div v-if="selectedIds.length > 0" class="bulk-bar">
-        <span class="text-xs text-green-400 font-medium">{{ $t('adminPage.selected', { count: selectedIds.length }) }}</span>
-        <button @click="$emit('batch-action', 'pause')" class="text-xs px-3 py-1.5 rounded-lg bg-yellow-500/15 text-yellow-400 hover:bg-yellow-500/25 transition cursor-pointer"><i class="fas fa-pause mr-1"></i>{{ $t('adminPage.bulkPause') }}</button>
-        <button @click="$emit('batch-action', 'resume')" class="text-xs px-3 py-1.5 rounded-lg bg-green-500/15 text-green-400 hover:bg-green-500/25 transition cursor-pointer"><i class="fas fa-play mr-1"></i>{{ $t('adminPage.bulkResume') }}</button>
-        <button @click="$emit('batch-action', 'delete')" class="text-xs px-3 py-1.5 rounded-lg bg-red-500/15 text-red-400 hover:bg-red-500/25 transition cursor-pointer"><i class="fas fa-trash mr-1"></i>{{ $t('adminPage.bulkDelete') }}</button>
-        <button @click="$emit('update:selectedIds', [])" class="ml-auto text-xs text-slate-500 hover:text-white cursor-pointer"><i class="fas fa-times"></i></button>
+        <span class="text-xs text-green-600 dark:text-green-400 font-medium">{{ $t('adminPage.selected', { count: selectedIds.length }) }}</span>
+        <button @click="$emit('batch-action', 'pause')" class="text-xs px-3 py-1.5 rounded-lg bg-yellow-500/15 text-yellow-600 hover:bg-yellow-500/25 dark:text-yellow-400 transition cursor-pointer"><i class="fas fa-pause mr-1"></i>{{ $t('adminPage.bulkPause') }}</button>
+        <button @click="$emit('batch-action', 'resume')" class="text-xs px-3 py-1.5 rounded-lg bg-green-500/15 text-green-600 hover:bg-green-500/25 dark:text-green-400 transition cursor-pointer"><i class="fas fa-play mr-1"></i>{{ $t('adminPage.bulkResume') }}</button>
+        <button @click="$emit('batch-action', 'delete')" class="text-xs px-3 py-1.5 rounded-lg bg-red-500/15 text-red-500 hover:bg-red-500/25 dark:text-red-400 transition cursor-pointer"><i class="fas fa-trash mr-1"></i>{{ $t('adminPage.bulkDelete') }}</button>
+        <button @click="$emit('batch-action', 'check')" :disabled="batchChecking" class="text-xs px-3 py-1.5 rounded-lg bg-slate-500/15 text-slate-600 hover:bg-slate-500/25 dark:text-slate-400 transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"><i class="fas fa-sync-alt mr-1" :class="{ 'fa-spin': batchChecking }"></i>{{ $t('adminPage.bulkRefresh') }}</button>
+        <button @click="$emit('update:selectedIds', [])" class="ml-auto text-xs text-slate-500 hover:text-slate-900 dark:hover:text-white cursor-pointer"><i class="fas fa-times"></i></button>
       </div>
     </div>
 
@@ -48,16 +48,18 @@
           <div class="flex items-center gap-2 mb-0.5">
             <router-link :to="`/monitor/${m.id}`" class="flex items-center gap-1.5 min-w-0 group/name hover:underline decoration-green-500/50 underline-offset-4" :title="$t('monitorCard.viewDetails')">
               <h3 class="font-semibold text-slate-900 dark:text-white truncate group-hover:text-green-500 dark:group-hover:text-emerald-400 transition-colors">{{ m.name }}</h3>
-              <i class="fas fa-external-link-alt text-[9px] text-green-500 dark:text-emerald-400 opacity-40 group-hover/name:opacity-100 transition-opacity shrink-0"></i>
             </router-link>
             <span class="text-[10px] font-mono text-slate-600 shrink-0">{{ m.method || 'GET' }}</span>
             <span v-if="m.status === 'DOWN'" class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-red-500/20 text-red-400 animate-pulse">{{ $t('status.down') }}</span>
             <span v-if="m.status === 'RETRYING'" class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-yellow-500/20 text-yellow-400">{{ $t('status.retrying') }}</span>
             <span v-if="m.paused" class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-slate-700 text-slate-400">{{ $t('status.paused') }}</span>
           </div>
-          <a :href="m.url" target="_blank" class="text-xs text-slate-500 hover:text-green-400 font-mono flex items-center gap-1 truncate max-w-xs transition-colors">
-            {{ m.url }} <i class="fas fa-external-link-alt text-[8px] opacity-40"></i>
-          </a>
+          <div class="flex items-center gap-2 min-w-0">
+            <a :href="m.url" target="_blank" class="text-xs text-slate-500 hover:text-green-400 font-mono flex items-center gap-1 truncate min-w-0 max-w-xs transition-colors">
+              {{ m.url }} <i class="fas fa-external-link-alt text-[8px] opacity-40"></i>
+            </a>
+            <span class="text-[11px] font-mono text-slate-500 dark:text-slate-400 shrink-0 cursor-default" :title="$t('adminPage.lastCheck')">{{ formatDateTime(m.last_check) }}</span>
+          </div>
           <div class="flex flex-wrap items-center gap-1.5 mt-1">
             <span v-if="m.keyword" class="text-[10px] text-slate-600 flex items-center gap-1"><i class="fas fa-filter text-[8px]"></i>{{ m.keyword }}</span>
             <span v-for="tag in parseTags(m.tags)" :key="tag" class="tag-chip">{{ tag }}</span>
@@ -66,7 +68,7 @@
       </div>
       <!-- 右侧状态与操作 -->
       <div class="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 w-full md:w-auto border-t md:border-t-0 border-slate-100 dark:border-white/5 pt-3 md:pt-0">
-        <div class="flex flex-wrap sm:grid sm:grid-cols-4 md:flex md:items-center gap-3 md:gap-4 text-left md:text-right flex-1 md:flex-none w-full sm:w-auto">
+        <div class="flex flex-wrap sm:grid sm:grid-cols-3 md:flex md:items-center gap-3 md:gap-4 text-left md:text-right flex-1 md:flex-none w-full sm:w-auto">
           <div v-if="m._latency != null && !m.paused" class="flex flex-col w-[calc(50%-6px)] sm:w-auto">
             <span class="text-[9px] uppercase tracking-wider text-slate-500 dark:text-slate-600 font-bold">{{ $t('common.latency') }}</span>
             <span class="text-[11px] font-mono font-bold" :class="m._latency < 200 ? 'text-green-500' : m._latency < 500 ? 'text-yellow-500' : 'text-red-500'">{{ m._latency }}ms</span>
@@ -75,10 +77,6 @@
             <svg class="w-[80px] h-[24px] mini-sparkline" :class="m.status === 'DOWN' ? 'text-red-500' : 'text-green-500'" viewBox="0 0 80 24" preserveAspectRatio="none">
               <path :d="miniSparkline(m._sparkData)" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.7"/>
             </svg>
-          </div>
-          <div class="flex flex-col w-[calc(50%-6px)] sm:w-auto">
-            <span class="text-[9px] uppercase tracking-wider text-slate-500 dark:text-slate-600 font-bold">{{ $t('adminPage.lastCheck') }}</span>
-            <span class="text-[11px] font-mono text-slate-500 dark:text-slate-400">{{ formatDateFull(m.last_check) }}</span>
           </div>
           <div class="flex flex-col w-[calc(50%-6px)] sm:w-auto">
             <span class="text-[9px] uppercase tracking-wider text-slate-500 dark:text-slate-600 font-bold">{{ $t('adminPage.ssl') }}</span>
@@ -120,17 +118,29 @@
 </template>
 
 <script setup>
-import { ref, watch, nextTick, onMounted, onBeforeUnmount } from 'vue';
+import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue';
+import { useI18n } from 'vue-i18n';
 import Sortable from 'sortablejs';
-import { formatDateFull, formatExpiryDate, getDaysRemaining, getExpiryClassAdmin } from '../../utils/format';
+import { formatDateTime, formatExpiryDate, getDaysRemaining, getExpiryClassAdmin } from '../../utils/format';
+import AppSelect from '../common/AppSelect.vue';
 
 const props = defineProps({
     monitors: Array, filteredMonitors: Array, allTags: Array,
-    activeTag: String, selectedIds: Array, searchQuery: String, sortKey: String,
+    activeTag: String, selectedIds: Array, searchQuery: String, sortKey: String, loading: Boolean,
+    batchChecking: Boolean,
 });
 const emit = defineEmits([
     'update:activeTag', 'update:selectedIds', 'update:searchQuery', 'update:sortKey',
-    'force-check', 'toggle-pause', 'open-config', 'view-logs', 'clone', 'delete', 'batch-action', 'reorder'
+    'force-check', 'toggle-pause', 'open-config', 'view-logs', 'clone', 'delete', 'batch-action', 'reorder', 'refresh'
+]);
+
+const { t } = useI18n();
+const sortOptions = computed(() => [
+    { value: '',        label: t('adminPage.sortDefault') },
+    { value: 'name',    label: t('adminPage.sortByName') },
+    { value: 'status',  label: t('adminPage.sortByStatus') },
+    { value: 'latency', label: t('adminPage.sortByLatency') },
+    { value: 'ssl',     label: t('adminPage.sortBySsl') },
 ]);
 
 const listRef = ref(null);

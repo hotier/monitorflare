@@ -26,15 +26,15 @@
           <span class="hidden sm:inline text-slate-500 dark:text-slate-400">{{ loading ? $t('statusHeader.syncing') : $t('statusHeader.live') }}</span>
         </div>
         <!-- 语言切换 -->
-        <div class="relative">
-          <button @click="langOpen = !langOpen" class="flex items-center gap-1 h-8 px-1.5 sm:px-2.5 rounded-lg text-xs font-medium text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-black/[0.06] dark:hover:bg-white/[0.06] transition-all cursor-pointer">
+        <div class="relative" ref="langRef">
+          <button @click="langOpen = !langOpen" :title="$t('languages.' + locale)" class="flex items-center gap-1 h-8 px-1.5 sm:px-2 rounded-lg text-xs font-medium text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-black/[0.06] dark:hover:bg-white/[0.06] transition-all cursor-pointer">
             <i class="fas fa-globe text-[11px]"></i>
-            <span class="hidden sm:inline">{{ $t('languages.' + locale) }}</span>
+            <span class="hidden sm:inline">{{ shortLang }}</span>
             <i class="fas fa-chevron-down text-[8px]"></i>
           </button>
-          <div v-if="langOpen" class="absolute right-0 mt-1.5 w-40 rounded-xl border border-slate-200 dark:border-white/10 bg-white dark:bg-slate-900 shadow-xl overflow-hidden z-50">
+          <div v-if="langOpen" class="absolute right-0 mt-1.5 w-24 rounded-xl border border-slate-200 dark:border-white/10 bg-white dark:bg-slate-900 shadow-xl overflow-hidden z-50">
             <button v-for="l in langList" :key="l" @click="changeLang(l)"
-              class="w-full flex items-center justify-between px-3.5 py-2 text-xs text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-white/[0.05] cursor-pointer"
+              class="w-full flex items-center justify-between px-3 py-2 text-xs text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-white/[0.05] cursor-pointer"
               :class="{ 'font-bold text-emerald-600 dark:text-emerald-400': l === locale }">
               {{ $t('languages.' + l) }}
               <i v-if="l === locale" class="fas fa-check text-[9px]"></i>
@@ -56,18 +56,13 @@
             <path d="M9 17.25v1.007a3 3 0 01-.879 2.122L7.5 21h9l-.621-.621A3 3 0 0115 18.257V17.25m6-12V15a2.25 2.25 0 01-2.25 2.25H5.25A2.25 2.25 0 013 15V5.25m18 0A2.25 2.25 0 0018.75 3H5.25A2.25 2.25 0 003 5.25m18 0H3"/>
           </svg>
         </router-link>
-        <!-- GitHub 链接 -->
-        <a href="https://github.com/xusteve/MonitorFlare" target="_blank" rel="noopener" :title="$t('footer.github')" :aria-label="$t('footer.github')"
-          class="w-8 h-8 rounded-lg flex items-center justify-center text-slate-400 dark:text-slate-500 hover:text-slate-900 dark:hover:text-white hover:bg-black/[0.06] dark:hover:bg-white/[0.06] transition-all duration-300">
-          <i class="fa-brands fa-github text-[15px]"></i>
-        </a>
       </div>
     </div>
   </header>
 </template>
 
 <script setup>
-import { ref } from 'vue';
+import { ref, computed, onMounted, onBeforeUnmount } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { setAppLanguage } from '../../main';
 
@@ -80,11 +75,19 @@ defineEmits(['toggle-theme']);
 
 const { locale } = useI18n();
 const langOpen = ref(false);
-const langList = ['en', 'zh', 'zh-tw', 'ja', 'ko', 'de', 'fr', 'it', 'es'];
+const langRef = ref(null);
+const langList = ['en', 'zh'];
+const shortLang = computed(() => (locale.value === 'zh' ? '中文' : 'EN'));
 
 const changeLang = (l) => {
     setAppLanguage(l);
     locale.value = l;
     langOpen.value = false;
 };
+
+const onClickOutside = (e) => {
+    if (langOpen.value && langRef.value && !langRef.value.contains(e.target)) langOpen.value = false;
+};
+onMounted(() => document.addEventListener('click', onClickOutside));
+onBeforeUnmount(() => document.removeEventListener('click', onClickOutside));
 </script>

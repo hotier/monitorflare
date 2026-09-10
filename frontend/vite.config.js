@@ -77,6 +77,19 @@ export default defineConfig(({ mode }) => {
           target: env.VITE_WORKER_URL || 'http://127.0.0.1:8787',
           changeOrigin: true,
           rewrite: (path) => path.replace(/^\/api/, ''),
+          // wrangler 启动比 vite 慢约 10s,窗口期请求降级为 503,避免刷 ECONNREFUSED 堆栈
+          configure: (proxy) => {
+            proxy.on('error', (err, req, res) => {
+              if (err.code === 'ECONNREFUSED') {
+                if (res && !res.headersSent) {
+                  res.writeHead(503, { 'Content-Type': 'application/json' });
+                  res.end('{"error":"worker_not_ready"}');
+                }
+                return;
+              }
+              console.error('[proxy]', err);
+            });
+          },
         },
       },
     },
