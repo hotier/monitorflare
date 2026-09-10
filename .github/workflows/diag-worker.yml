@@ -25,7 +25,7 @@ jobs:
             | jq '{success, errors, result}'
           echo "== versions =="
           curl -sS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$API/versions" \
-            | jq '{success, result: [.result[]? | {id: .id, number: .number, created_on: .created_on, source: .source}]}'
+            | jq -c '[.result[] | {id, number, created_on}]' || true
           echo "== settings (compatibility date / bindings) =="
           curl -sS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$API/settings" \
             | jq '{success, result: {compatibility_date: .result.compatibility_date, compatibility_flags: .result.compatibility_flags, bindings: [.result.bindings[]? | {type, name, namespace_id: .namespace_id, text: .text}]}}'
