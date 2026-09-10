@@ -10,14 +10,14 @@ jobs:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
       - name: tail worker and probe
         run: |
-          cd worker
           (npx --yes wrangler@4 tail monitorflare-worker --format=json > /tmp/tail.log 2>&1 &)
-          sleep 30
+          sleep 35
           echo "== probe =="
           curl -sS -o /tmp/resp -w "status=%{http_code}\n" "https://monitorflare-worker.lht1976277790-002.workers.dev/settings" || true
           head -c 300 /tmp/resp; echo
