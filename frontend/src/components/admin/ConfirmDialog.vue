@@ -1,22 +1,26 @@
 <template>
   <transition enter-active-class="transition duration-200 ease-out" enter-from-class="opacity-0" enter-to-class="opacity-100">
     <div class="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm admin-modal-overlay">
-      <!-- 标题靠左、警示图标靠右上:按"先读结论、再看提示"的顺序排,长文案换行也不会把标题挤歪 -->
+      <!-- 头部与其它弹窗统一:左上角图标 + 标题,提示文案作为描述放在下方 -->
       <div class="glass admin-modal w-full max-w-sm rounded-2xl shadow-2xl overflow-hidden"
         role="alertdialog" aria-modal="true" aria-labelledby="confirm-dialog-title" aria-describedby="confirm-dialog-message">
-        <div class="flex items-start justify-between gap-3 px-6 pt-6 pb-2">
-          <h3 id="confirm-dialog-title" class="text-lg font-bold text-white pt-1.5">{{ $t('confirmDialog.title') }}</h3>
-          <div class="w-10 h-10 shrink-0 bg-red-500/15 rounded-full flex items-center justify-center">
-            <i class="fas fa-exclamation-triangle text-red-500" aria-hidden="true"></i>
+        <div class="px-6 pt-5 pb-3">
+          <div class="flex items-center gap-3">
+            <div class="w-9 h-9 shrink-0 rounded-xl bg-red-500/15 flex items-center justify-center">
+              <i class="fas fa-exclamation-triangle text-red-500" aria-hidden="true"></i>
+            </div>
+            <h3 id="confirm-dialog-title" class="text-base font-bold text-white">{{ $t('confirmDialog.title') }}</h3>
           </div>
         </div>
-        <p id="confirm-dialog-message" class="px-6 pb-6 text-sm text-slate-400 break-words">{{ message }}</p>
-        <div class="px-6 pb-6 flex gap-3">
-          <!-- 取消:实心中性色按钮。原先只有 border-slate-600 + hover:bg-white/5,
-               而 base.css 会把 border-slate-600 改写成 #cbd5e1 —— 浅色下等于"白底浅边框无悬停反馈",
-               看着不像按钮;改成浅色 slate-200 / 深色 white-10 的实心底,两种主题都有明确形态 -->
-          <button type="button" @click="$emit('cancel')" class="flex-1 py-2.5 rounded-xl bg-slate-200 text-slate-700 hover:bg-slate-300 dark:bg-white/10 dark:text-slate-200 dark:hover:bg-white/20 transition font-medium text-sm cursor-pointer">{{ $t('confirmDialog.cancel') }}</button>
-          <button type="button" @click="$emit('confirm')" class="flex-1 py-2.5 rounded-xl bg-red-600 hover:bg-red-500 text-white font-medium text-sm transition shadow-sm cursor-pointer">{{ confirmText || $t('confirmDialog.confirmDelete') }}</button>
+        <div class="px-6 pt-5 pb-6">
+          <p id="confirm-dialog-message" class="text-sm text-slate-400 break-words">{{ message }}</p>
+          <div class="mt-6 flex gap-3">
+            <!-- 取消:实心中性色按钮。原先只有 border-slate-600 + hover:bg-white/5,
+                 而 base.css 会把 border-slate-600 改写成 #cbd5e1 —— 浅色下等于"白底浅边框无悬停反馈",
+                 看着不像按钮;改成浅色 slate-200 / 深色 white-10 的实心底,两种主题都有明确形态 -->
+            <button type="button" @click="$emit('cancel')" class="flex-1 py-2 rounded-xl bg-slate-200 text-slate-700 hover:bg-slate-300 dark:bg-white/10 dark:text-slate-200 dark:hover:bg-white/20 transition font-medium text-xs cursor-pointer">{{ $t('confirmDialog.cancel') }}</button>
+            <button type="button" @click="$emit('confirm')" class="flex-1 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white font-bold text-xs transition shadow-sm cursor-pointer">{{ confirmText || $t('confirmDialog.confirmDelete') }}</button>
+          </div>
         </div>
       </div>
     </div>

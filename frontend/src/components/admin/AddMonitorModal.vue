@@ -4,11 +4,11 @@
       <div class="absolute inset-0 bg-black/60 backdrop-blur-sm admin-modal-overlay" @click="$emit('close')"></div>
       <div class="relative w-full max-w-2xl glass admin-modal rounded-2xl shadow-2xl flex flex-col overflow-hidden" style="animation:modal-in 0.25s ease-out">
         <!-- 头部 -->
-        <div class="px-8 py-5 border-b border-white/5 bg-gradient-to-r from-green-900/15 to-transparent">
+        <div class="px-8 pt-5 pb-4">
           <div class="flex items-center justify-between">
             <div class="flex items-center gap-3">
-              <div class="w-10 h-10 bg-green-500/15 rounded-xl flex items-center justify-center"><i class="fas fa-satellite-dish text-green-400"></i></div>
-              <div><h3 class="text-lg font-bold text-white">{{ $t('monitorForm.title') }}</h3><p class="text-xs text-slate-500 mt-0.5">{{ $t('monitorForm.subtitle') }}</p></div>
+              <div class="w-9 h-9 rounded-xl bg-green-500/15 flex items-center justify-center shrink-0"><i class="fas fa-satellite-dish text-green-500 dark:text-green-400"></i></div>
+              <div><h3 class="text-base font-bold text-white">{{ $t('monitorForm.title') }}</h3><p class="text-xs text-slate-500 mt-0.5">{{ $t('monitorForm.subtitle') }}</p></div>
             </div>
             <button @click="$emit('close')" class="p-2 rounded-xl text-slate-400 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"><i class="fas fa-times text-lg"></i></button>
           </div>
@@ -35,10 +35,10 @@
           <div>
             <h4 class="text-xs font-bold uppercase tracking-wider text-slate-500 mb-4 flex items-center gap-2"><i class="fas fa-cubes text-green-500"></i> {{ $t('monitorForm.type') }}</h4>
             <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              <label v-for="tp in monitorTypes" :key="tp.value"
-                class="flex flex-col items-center justify-center py-3 rounded-xl border-2 cursor-pointer transition-all text-center"
+              <label v-for="tp in monitorTypes" :key="tp.value" @mousedown.prevent
+                class="relative flex flex-col items-center justify-center py-3 rounded-xl border-2 cursor-pointer transition-all text-center"
                 :class="newMonitor.type === tp.value ? 'border-green-500 bg-green-900/20 text-green-400' : 'border-slate-700 text-slate-400 hover:border-green-500/40'">
-                <input type="radio" :value="tp.value" v-model="newMonitor.type" class="sr-only">
+                <input type="radio" :value="tp.value" v-model="newMonitor.type" class="focus-safe-input">
                 <span class="text-sm font-bold">{{ $t(tp.labelKey) }}</span>
                 <span class="text-[11px] opacity-80 mt-0.5">{{ $t(tp.descKey) }}</span>
               </label>
@@ -46,7 +46,7 @@
             <div v-if="newMonitor.type === 'dns'" class="grid grid-cols-1 sm:grid-cols-2 gap-5 mt-4">
               <div>
                 <label class="block text-sm font-medium text-slate-300 mb-2">{{ $t('monitorForm.dnsRecordType') }}</label>
-                <AppSelect v-model="newMonitor.record_type" :options="dnsRecordTypes" />
+                <AppSelect v-model="newMonitor.record_type" :options="dnsRecordTypes" mono />
               </div>
               <div>
                 <label class="block text-sm font-medium text-slate-300 mb-2">{{ $t('monitorForm.dnsExpected') }}</label>
@@ -64,10 +64,10 @@
           <div>
             <h4 class="text-xs font-bold uppercase tracking-wider text-slate-500 mb-4 flex items-center gap-2"><i class="fas fa-clock text-cyan-400"></i> {{ $t('configModal.frequency') }}</h4>
             <div class="grid grid-cols-3 sm:grid-cols-6 gap-2">
-              <label v-for="opt in [{value:60,label:$t('monitorForm.minutes',{count:1})},{value:180,label:$t('monitorForm.minutes',{count:3})},{value:300,label:$t('monitorForm.minutes',{count:5})},{value:600,label:$t('monitorForm.minutes',{count:10})},{value:900,label:$t('monitorForm.minutes',{count:15})},{value:1800,label:$t('monitorForm.minutes',{count:30})}]" :key="opt.value"
-                class="flex flex-col items-center justify-center py-2.5 rounded-xl border-2 cursor-pointer transition-all text-center"
+              <label v-for="opt in [{value:60,label:$t('monitorForm.minutes',{count:1})},{value:180,label:$t('monitorForm.minutes',{count:3})},{value:300,label:$t('monitorForm.minutes',{count:5})},{value:600,label:$t('monitorForm.minutes',{count:10})},{value:900,label:$t('monitorForm.minutes',{count:15})},{value:1800,label:$t('monitorForm.minutes',{count:30})}]" :key="opt.value" @mousedown.prevent
+                class="relative flex flex-col items-center justify-center py-2.5 rounded-xl border-2 cursor-pointer transition-all text-center"
                 :class="Number(newMonitor.interval) === opt.value ? 'border-green-500 bg-green-900/20 text-green-400' : 'border-slate-700 text-slate-400 hover:border-green-500/40'">
-                <input type="radio" :value="opt.value" v-model="newMonitor.interval" class="sr-only">
+                <input type="radio" :value="opt.value" v-model="newMonitor.interval" class="focus-safe-input">
                 <span class="text-sm font-bold">{{ opt.label }}</span>
               </label>
             </div>
@@ -78,7 +78,7 @@
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-5">
               <div>
                 <label class="block text-sm font-medium text-slate-300 mb-2">{{ $t('monitorForm.method') }}</label>
-                <AppSelect v-model="newMonitor.method" :options="httpMethods" />
+                <AppSelect v-model="newMonitor.method" :options="httpMethods" mono />
               </div>
               <div>
                 <label class="block text-sm font-medium text-slate-300 mb-2">{{ $t('monitorForm.keyword') }} <span class="text-xs font-normal text-slate-500">{{ $t('common.optional') }}</span></label>
@@ -104,6 +104,10 @@
             <div class="mt-4">
               <label class="block text-sm font-medium text-slate-300 mb-2">{{ $t('configModal.errorRate') }} <span class="text-xs font-normal text-slate-500">{{ $t('monitorForm.errorRateZero') }}</span></label>
               <input type="number" v-model="newMonitor.alert_error_rate" min="0" max="100" placeholder="0" class="input-field w-full border border-slate-700 rounded-xl px-4 py-3 text-sm bg-slate-800/80 text-white outline-none placeholder-slate-600">
+            </div>
+            <div class="mt-4">
+              <label class="block text-sm font-medium text-slate-300 mb-2">{{ $t('configModal.latencyThreshold') }} <span class="text-xs font-normal text-slate-500">{{ $t('monitorForm.errorRateZero') }}</span></label>
+              <input type="number" v-model.number="newMonitor.alert_latency_ms" min="0" max="600000" placeholder="0" class="input-field w-full border border-slate-700 rounded-xl px-4 py-3 text-sm bg-slate-800/80 text-white outline-none placeholder-slate-600">
             </div>
           </div>
           <!-- 检测功能 -->
@@ -131,8 +135,8 @@
         <div class="px-8 py-5 border-t border-white/5 bg-slate-900/30 flex items-center justify-between">
           <p class="text-xs text-slate-600 hidden sm:block"><i class="fas fa-keyboard mr-1"></i> {{ $t('monitorForm.enterHint') }}</p>
           <div class="flex gap-3 ml-auto">
-            <button @click="$emit('close')" class="px-5 py-2.5 text-sm font-medium text-slate-300 hover:bg-white/5 rounded-xl transition-colors cursor-pointer border border-slate-700">{{ $t('common.cancel') }}</button>
-            <button @click="$emit('submit')" :disabled="submitting" class="px-6 py-2.5 bg-green-600 hover:bg-green-700 text-white text-sm font-semibold rounded-xl transition-all shadow-sm disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 cursor-pointer">
+            <button @click="$emit('close')" class="inline-flex items-center justify-center px-3 py-2 text-xs font-medium text-slate-300 hover:bg-white/5 rounded-xl transition-colors cursor-pointer border border-slate-700">{{ $t('common.cancel') }}</button>
+            <button @click="$emit('submit')" :disabled="submitting" class="inline-flex items-center justify-center gap-1.5 px-3 py-2 bg-green-600 hover:bg-green-700 text-white text-xs font-bold rounded-xl transition-all shadow-sm disabled:opacity-50 disabled:cursor-not-allowed border border-transparent cursor-pointer">
               <i v-if="submitting" class="fas fa-spinner fa-spin text-xs"></i>
               <i v-else class="fas fa-rocket text-xs"></i>
               {{ submitting ? $t('monitorForm.creating') : $t('monitorForm.create') }}

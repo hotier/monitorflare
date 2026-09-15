@@ -9,11 +9,11 @@
 
         <div class="p-7 relative z-10">
           <div class="flex items-start gap-4 mb-7">
-            <div class="w-12 h-12 rounded-xl bg-emerald-50 dark:bg-emerald-500/10 border border-emerald-200 dark:border-emerald-500/20 flex items-center justify-center shrink-0">
-              <i class="fas fa-lock text-lg text-emerald-600 dark:text-emerald-400"></i>
+            <div class="w-9 h-9 rounded-xl bg-emerald-50 dark:bg-emerald-500/10 border border-emerald-200 dark:border-emerald-500/20 flex items-center justify-center shrink-0">
+              <i class="fas fa-lock text-base text-emerald-600 dark:text-emerald-400"></i>
             </div>
             <div class="min-w-0 flex-1">
-              <h2 class="text-2xl font-bold text-slate-900 dark:text-white tracking-tight">{{ $t('login.title') }}</h2>
+              <h2 class="text-xl font-bold text-slate-900 dark:text-white tracking-tight">{{ $t('login.title') }}</h2>
             </div>
             <!-- 语言切换 -->
             <div class="relative shrink-0" ref="langRef">

@@ -28,16 +28,16 @@
           <button @click="showSettings = true" class="flex items-center gap-1.5 px-3 py-2 bg-slate-200 dark:bg-slate-700/50 hover:bg-slate-300 dark:hover:bg-slate-600/50 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white text-xs font-medium rounded-xl transition-all cursor-pointer border border-slate-300 dark:border-slate-600/50">
             <i class="fas fa-cog text-xs"></i> {{ $t('adminPage.settings') }}
           </button>
-          <button @click="exportMonitors" class="flex items-center gap-1.5 px-3 py-2 bg-slate-200 dark:bg-slate-700/50 hover:bg-slate-300 dark:hover:bg-slate-600/50 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white text-xs font-medium rounded-xl transition-all cursor-pointer border border-slate-300 dark:border-slate-600/50">
-            <i class="fas fa-download text-xs"></i> {{ $t('adminPage.export') }}
-          </button>
           <button @click="showApiKeys = true" class="flex items-center gap-1.5 px-3 py-2 bg-slate-200 dark:bg-slate-700/50 hover:bg-slate-300 dark:hover:bg-slate-600/50 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white text-xs font-medium rounded-xl transition-all cursor-pointer border border-slate-300 dark:border-slate-600/50">
             <i class="fas fa-key text-xs"></i> {{ $t('adminPage.apiKeys') }}
           </button>
           <button @click="showChannels = true" class="flex items-center gap-1.5 px-3 py-2 bg-slate-200 dark:bg-slate-700/50 hover:bg-slate-300 dark:hover:bg-slate-600/50 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white text-xs font-medium rounded-xl transition-all cursor-pointer border border-slate-300 dark:border-slate-600/50">
             <i class="fas fa-bell text-xs"></i> {{ $t('adminPage.channels') }}
           </button>
-          <button @click="showAddModal = true" class="flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-500 text-white text-sm font-medium rounded-xl transition-all hover:shadow-lg hover:shadow-green-500/20 cursor-pointer">
+          <button @click="showAlertTemplates = true" class="flex items-center gap-1.5 px-3 py-2 bg-slate-200 dark:bg-slate-700/50 hover:bg-slate-300 dark:hover:bg-slate-600/50 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white text-xs font-medium rounded-xl transition-all cursor-pointer border border-slate-300 dark:border-slate-600/50">
+            <i class="fas fa-file-code text-xs"></i> {{ $t('adminPage.alertTemplates') }}
+          </button>
+          <button @click="showAddModal = true" class="flex items-center gap-1.5 px-3 py-2 bg-green-600 hover:bg-green-500 text-white text-xs font-bold rounded-xl transition-all hover:shadow-lg hover:shadow-green-500/20 cursor-pointer border border-transparent">
             <i class="fas fa-plus text-xs"></i> {{ $t('adminPage.addMonitor') }}
           </button>
         </div>
@@ -78,7 +78,7 @@
         </div>
         <h3 class="text-lg font-medium text-slate-900 dark:text-white">{{ $t('adminPage.noMonitorsTitle') }}</h3>
         <p class="text-slate-500 mt-1 mb-6 text-sm">{{ $t('adminPage.noMonitorsDesc') }}</p>
-        <button @click="showAddModal = true" class="inline-flex items-center gap-2 px-5 py-2.5 bg-green-600 hover:bg-green-500 text-white text-sm font-medium rounded-xl transition-all shadow-sm hover:shadow-lg hover:shadow-green-500/20 cursor-pointer">
+        <button @click="showAddModal = true" class="inline-flex items-center gap-2 px-5 py-2.5 bg-green-600 hover:bg-green-500 text-white text-sm font-bold rounded-xl transition-all shadow-sm hover:shadow-lg hover:shadow-green-500/20 cursor-pointer">
           <i class="fas fa-plus text-xs"></i> {{ $t('adminPage.addFirstMonitor') }}
         </button>
       </div>
@@ -114,13 +114,15 @@
       @close="showAddModal = false" @submit="addMonitor" />
 
     <ConfigModal v-if="showConfig" :configTarget="configTarget" :configForm="configForm" :configSaving="configSaving"
-      @close="showConfig = false" @save="saveConfig" />
+      :globalRules="globalAlertRules" @close="showConfig = false" @save="saveConfig" />
 
     <LogsModal v-if="showLogs" :monitor="currentMonitor" :logs="logs" :logsLoading="logsLoading"
       :hasMoreLogs="hasMoreLogs" :sparkline="sparklineComputed" :uptimeStats="uptimeStats" :latencyPercentiles="latencyPercentiles"
       @close="showLogs = false" @load-more="loadMoreLogs" />
 
     <ChannelsModal v-if="showChannels" @close="showChannels = false" />
+
+    <AlertTemplatesModal v-if="showAlertTemplates" @close="showAlertTemplates = false" />
 
     <IncidentsModal v-if="showIncidents" :monitors="monitors" @close="showIncidents = false" />
 
@@ -158,6 +160,7 @@ import AddMonitorModal from '../components/admin/AddMonitorModal.vue';
 import ConfigModal from '../components/admin/ConfigModal.vue';
 import LogsModal from '../components/admin/LogsModal.vue';
 import ChannelsModal from '../components/admin/ChannelsModal.vue';
+import AlertTemplatesModal from '../components/admin/AlertTemplatesModal.vue';
 import IncidentsModal from '../components/admin/IncidentsModal.vue';
 import SettingsModal from '../components/admin/SettingsModal.vue';
 import ApiKeysModal from '../components/admin/ApiKeysModal.vue';
@@ -178,7 +181,7 @@ const footerUrl = import.meta.env.VITE_FOOTER_URL || '#';
 const EMPTY_SETTINGS = {};
 
 /**
- * 监控列表 = 管理端配置(/monitors) + 公开状态数据(/monitors/public/details)
+ * 监控列表 = 管理端配置(/monitors) + 公开状态数据(/monitors/public?detail=1)
  *
  * 注意这里返回的是**新对象**(展开合并),不像以前那样就地往 adminData 的元素上挂
  * _latency/_sparkData。原因是 computed 每次重算都会重建数组,任何"挂在监控对象上的
@@ -222,12 +225,13 @@ const showAddModal = ref(false);
 const showConfig = ref(false);
 const showLogs = ref(false);
 const showChannels = ref(false);
+const showAlertTemplates = ref(false);
 const showIncidents = ref(false);
 const showSettings = ref(false);
 const showApiKeys = ref(false);
 
 // ── 添加监控 ──
-const newMonitor = ref({ name: '', url: '', type: 'http', record_type: 'A', expected: '', port: 443, method: 'GET', keyword: '', user_agent: '', tags: '', request_headers: '', request_body: '', interval: 300, check_ssl: true, check_domain: true, alert_silence_uptime: 24, alert_error_rate: 0 });
+const newMonitor = ref({ name: '', url: '', type: 'http', record_type: 'A', expected: '', port: 443, method: 'GET', keyword: '', user_agent: '', tags: '', request_headers: '', request_body: '', interval: 300, check_ssl: true, check_domain: true, alert_silence_uptime: 24, alert_error_rate: 0, alert_latency_ms: 0 });
 const submitting = ref(false);
 
 // ── 配置面板 ──
@@ -296,6 +300,22 @@ const loadAll = () => {
     resources.siteSettings.ensure();
 };
 
+/**
+ * 定时轮询:常规资源 60s,最重的"公开详情"隔轮才拉(≈120s)。
+ * 后台标签页整体停摆,回到前台立刻补一次 —— 这样开着管理页放一整天也不会
+ * 无限空转地打接口。
+ */
+let _tick = 0;
+const refreshTick = () => {
+    if (document.hidden) return;
+    _tick += 1;
+    resources.adminMonitors.ensure();
+    resources.health.ensure();
+    resources.siteSettings.ensure();
+    if (_tick % 2 === 0) resources.publicMonitors.ensure();
+};
+const onVisibility = () => { if (!document.hidden) loadAll(); };
+
 /** 强制刷新列表(增删改、手动检测、批量操作之后用) */
 const reloadMonitors = () => {
     if (!isAuthenticated.value) return;
@@ -352,7 +372,7 @@ const addMonitor = async () => {
         const res = await authFetchT(`${API_BASE}/monitors`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
         if (res.ok) {
             const created = await res.json();
-            newMonitor.value = { name: '', url: '', type: 'http', record_type: 'A', expected: '', port: 443, method: 'GET', keyword: '', user_agent: '', tags: '', request_headers: '', request_body: '', interval: 300, check_ssl: true, check_domain: true, alert_silence_hours: '24', alert_error_rate: 0 };
+            newMonitor.value = { name: '', url: '', type: 'http', record_type: 'A', expected: '', port: 443, method: 'GET', keyword: '', user_agent: '', tags: '', request_headers: '', request_body: '', interval: 300, check_ssl: true, check_domain: true, alert_silence_uptime: 24, alert_error_rate: 0, alert_latency_ms: 0 };
             showAddModal.value = false;
             addToast(t('adminPage.monitorAdded'), 'success');
             await reloadMonitors();
@@ -375,13 +395,13 @@ const forceCheck = async (m) => {
     // 用 id 集合判重,不再往监控对象上挂 _checking:列表是 computed 出来的,对象会被重建
     if (checkingIds.has(m.id)) return;
     checkingIds.add(m.id);
-    try { const res = await authFetchT(`${API_BASE}/monitors/${m.id}/check`, { method: 'POST' }); if (res.ok) { addToast(t('adminPage.updated', { name: m.name }), 'success'); reloadMonitors(); } } catch { addToast(t('common.networkError'), 'error'); }
+    try { const res = await authFetchT(`${API_BASE}/monitors/${m.id}?action=check`, { method: 'POST' }); if (res.ok) { addToast(t('adminPage.updated', { name: m.name }), 'success'); reloadMonitors(); } } catch { addToast(t('common.networkError'), 'error'); }
     finally { checkingIds.delete(m.id); }
 };
 
 // ── 暂停/恢复 ──
 const togglePause = async (m) => {
-    try { const res = await authFetchT(`${API_BASE}/monitors/${m.id}/pause`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ paused: m.paused ? 0 : 1 }) }); if (res.ok) { const d = await res.json(); addToast(d.paused ? t('adminPage.paused', { name: m.name }) : t('adminPage.resumed', { name: m.name }), 'info'); reloadMonitors(); } else { addToast(t('common.actionFailed'), 'error'); } } catch { addToast(t('common.networkError'), 'error'); }
+    try { const res = await authFetchT(`${API_BASE}/monitors/${m.id}?action=pause`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ paused: m.paused ? 0 : 1 }) }); if (res.ok) { const d = await res.json(); addToast(d.paused ? t('adminPage.paused', { name: m.name }) : t('adminPage.resumed', { name: m.name }), 'info'); reloadMonitors(); } else { addToast(t('common.actionFailed'), 'error'); } } catch { addToast(t('common.networkError'), 'error'); }
 };
 
 // ── 克隆 ──
@@ -392,9 +412,23 @@ const cloneMonitor = (m) => {
 };
 
 // ── 配置 ──
+/** 站点设置里的全局告警判定口径:监控配置弹窗用它显示「留空跟随全局」的默认值 */
+const globalAlertRules = computed(() => {
+    const s = siteSettings.value || {};
+    return {
+        errorRateWindowMin: Number(s.alert_error_rate_window) || 5,
+        errorRateMinSamples: Number(s.alert_error_rate_min_samples) || 5,
+        errorRateSilenceMin: Number(s.alert_error_rate_silence) || 60,
+        latencySilenceMin: Number(s.alert_latency_silence) || 60,
+    };
+});
+
+/** 判定口径覆盖值:留空/非法 → null(后端据此清空覆盖,回落到全局规则) */
+const toRuleOverride = (v) => (v === '' || v === null || v === undefined || !Number.isFinite(Number(v)) ? null : Number(v));
+
 const openConfig = (m) => {
     configTarget.value = m;
-    configForm.value = { name: m.name || '', url: m.url || '', method: m.method || 'GET', keyword: m.keyword || '', user_agent: m.user_agent || '', tags: m.tags || '', request_headers: m.request_headers || '', request_body: m.request_body || '', interval: m.interval || 300, check_ssl: m.check_ssl !== 0, check_domain: m.check_domain !== 0, alert_silence_uptime: m.alert_silence_uptime ?? 24, alert_silence_ssl: m.alert_silence_ssl ?? 24, alert_silence_domain: m.alert_silence_domain ?? 24, alert_error_rate: m.alert_error_rate ?? 0 };
+    configForm.value = { name: m.name || '', url: m.url || '', method: m.method || 'GET', keyword: m.keyword || '', user_agent: m.user_agent || '', tags: m.tags || '', request_headers: m.request_headers || '', request_body: m.request_body || '', interval: m.interval || 300, check_ssl: m.check_ssl !== 0, check_domain: m.check_domain !== 0, alert_silence_uptime: m.alert_silence_uptime ?? 24, alert_silence_ssl: m.alert_silence_ssl ?? 24, alert_silence_domain: m.alert_silence_domain ?? 24, alert_error_rate: m.alert_error_rate ?? 0, alert_latency_ms: m.alert_latency_ms ?? 0, alert_error_rate_window: m.alert_error_rate_window ?? null, alert_error_rate_min_samples: m.alert_error_rate_min_samples ?? null, alert_error_rate_silence: m.alert_error_rate_silence ?? null, alert_latency_silence: m.alert_latency_silence ?? null };
     showConfig.value = true;
 };
 
@@ -403,7 +437,7 @@ const saveConfig = async () => {
     if (!String(configForm.value.name || '').trim() || !String(configForm.value.url || '').trim()) { addToast(t('adminPage.fillNameUrl'), 'error'); return; }
     configSaving.value = true;
     try {
-        const body = { name: configForm.value.name, url: configForm.value.url, method: configForm.value.method || 'GET', keyword: configForm.value.keyword, user_agent: configForm.value.user_agent, tags: configForm.value.tags || '', request_headers: configForm.value.request_headers || '', request_body: configForm.value.request_body || '', interval: Number(configForm.value.interval), check_ssl: configForm.value.check_ssl ? 1 : 0, check_domain: configForm.value.check_domain ? 1 : 0, alert_silence_uptime: Number(configForm.value.alert_silence_uptime), alert_silence_ssl: Number(configForm.value.alert_silence_ssl), alert_silence_domain: Number(configForm.value.alert_silence_domain), alert_error_rate: Number(configForm.value.alert_error_rate ?? 0) };
+        const body = { name: configForm.value.name, url: configForm.value.url, method: configForm.value.method || 'GET', keyword: configForm.value.keyword, user_agent: configForm.value.user_agent, tags: configForm.value.tags || '', request_headers: configForm.value.request_headers || '', request_body: configForm.value.request_body || '', interval: Number(configForm.value.interval), check_ssl: configForm.value.check_ssl ? 1 : 0, check_domain: configForm.value.check_domain ? 1 : 0, alert_silence_uptime: Number(configForm.value.alert_silence_uptime), alert_silence_ssl: Number(configForm.value.alert_silence_ssl), alert_silence_domain: Number(configForm.value.alert_silence_domain), alert_error_rate: Number(configForm.value.alert_error_rate ?? 0), alert_latency_ms: Math.min(Math.max(Math.round(Number(configForm.value.alert_latency_ms) || 0), 0), 600000), alert_error_rate_window: toRuleOverride(configForm.value.alert_error_rate_window), alert_error_rate_min_samples: toRuleOverride(configForm.value.alert_error_rate_min_samples), alert_error_rate_silence: toRuleOverride(configForm.value.alert_error_rate_silence), alert_latency_silence: toRuleOverride(configForm.value.alert_latency_silence) };
         const res = await authFetchT(`${API_BASE}/monitors/${configTarget.value.id}/config`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
         if (res.ok) { addToast(t('adminPage.saved'), 'success'); showConfig.value = false; reloadMonitors(); }
         else { const d = await res.json(); addToast(d.error || t('common.saveFailed'), 'error'); }
@@ -432,27 +466,29 @@ const viewLogs = async (monitor) => {
 
     logs.value = []; logOffset.value = 0; hasMoreLogs.value = false; logsLoading.value = true;
     try {
-        const res = await authFetchT(`${API_BASE}/monitors/${monitor.id}/logs?limit=${logLimit}&offset=0`);
+        const res = await authFetchT(`${API_BASE}/monitors?id=${monitor.id}&include=logs&limit=${logLimit}&offset=0`);
         if (res.ok) {
             const d = await res.json();
             // 晚到的响应不能覆盖:用户可能已经点开另一个监控了
             if (currentMonitor.value?.id !== monitor.id) return;
-            logs.value = d;
-            hasMoreLogs.value = d.length >= logLimit;
-            logOffset.value = d.length;
-            logsCache.set(monitor.id, { logs: d, offset: logOffset.value, hasMore: hasMoreLogs.value, at: Date.now() });
+            const rows = d.logs?.[monitor.id] || [];
+            logs.value = rows;
+            hasMoreLogs.value = rows.length >= logLimit;
+            logOffset.value = rows.length;
+            logsCache.set(monitor.id, { logs: rows, offset: logOffset.value, hasMore: hasMoreLogs.value, at: Date.now() });
         }
     } catch {} finally { logsLoading.value = false; }
 };
 const loadMoreLogs = async () => {
     if (!currentMonitor.value || logsLoading.value) return; logsLoading.value = true;
     try {
-        const res = await authFetchT(`${API_BASE}/monitors/${currentMonitor.value.id}/logs?limit=${logLimit}&offset=${logOffset.value}`);
+        const res = await authFetchT(`${API_BASE}/monitors?id=${currentMonitor.value.id}&include=logs&limit=${logLimit}&offset=${logOffset.value}`);
         if (res.ok) {
             const d = await res.json();
-            logs.value = [...logs.value, ...d];
-            hasMoreLogs.value = d.length >= logLimit;
-            logOffset.value += d.length;
+            const rows = d.logs?.[currentMonitor.value.id] || [];
+            logs.value = [...logs.value, ...rows];
+            hasMoreLogs.value = rows.length >= logLimit;
+            logOffset.value += rows.length;
             // 连"加载更多"的结果一起缓存,否则重开面板会丢掉已经翻过的页
             logsCache.set(currentMonitor.value.id, { logs: logs.value, offset: logOffset.value, hasMore: hasMoreLogs.value, at: Date.now() });
         }
@@ -523,22 +559,13 @@ const handleReorder = async (ids) => {
     try { await authFetchT(`${API_BASE}/monitors/reorder`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids }) }); addToast(t('adminPage.orderSaved'), 'success'); reloadMonitors(); } catch { addToast(t('adminPage.orderSaveFailed'), 'error'); }
 };
 
-// ── 导出 ──
-const exportMonitors = () => {
-    const data = monitors.value.map(m => ({ name: m.name, url: m.url, method: m.method, interval: m.interval, keyword: m.keyword, user_agent: m.user_agent, tags: m.tags, request_headers: m.request_headers, request_body: m.request_body }));
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-    const a = document.createElement('a'); a.style.display = 'none'; a.href = URL.createObjectURL(blob); a.download = `uptime-monitors-${new Date().toISOString().slice(0,10)}.json`;
-    document.body.appendChild(a); a.click(); setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(a.href); }, 200);
-    addToast(t('adminPage.exported', { count: data.length }), 'success');
-};
-
 // ── 键盘快捷键与轮询的启停 ──
 // keep-alive 下 onUnmounted 不会触发,所以这两样都必须挂到 onDeactivated 上:
 // 否则停在状态页时后台仍在每 30 秒轮询,按 r / n / / 还会操作到不可见的管理页。
 // (原先这个 setInterval 连句柄都没存、keydown 也没解绑,是这轮改造最容易出问题的地方。)
 const onKeydown = (e) => {
     if (['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)) return;
-    if (e.key === 'Escape') { showAddModal.value = false; showLogs.value = false; showConfig.value = false; showChannels.value = false; showIncidents.value = false; showSettings.value = false; if (confirmState.value.show) resolveConfirm(false); }
+    if (e.key === 'Escape') { showAddModal.value = false; showLogs.value = false; showConfig.value = false; showChannels.value = false; showAlertTemplates.value = false; showIncidents.value = false; showSettings.value = false; if (confirmState.value.show) resolveConfirm(false); }
     if ((e.key === 'n' || e.key === 'N') && !showAddModal.value && !showLogs.value && !showConfig.value) { e.preventDefault(); showAddModal.value = true; }
     if ((e.key === 'r' || e.key === 'R') && !showAddModal.value && !showLogs.value && !showConfig.value) { e.preventDefault(); reloadMonitors(); }
     if (e.key === '/' && !showAddModal.value && !showLogs.value && !showConfig.value) { e.preventDefault(); document.querySelector('.search-input')?.focus(); }
@@ -548,12 +575,14 @@ let _timer = null;
 // start 做成幂等:首次进入时 onMounted 与 onActivated 会连续触发,不能重复注册
 const startActive = () => {
     if (_timer) return;
-    _timer = setInterval(loadAll, 30000);
+    _timer = setInterval(refreshTick, 60000);
     document.addEventListener('keydown', onKeydown);
+    document.addEventListener('visibilitychange', onVisibility);
 };
 const stopActive = () => {
     if (_timer) { clearInterval(_timer); _timer = null; }
     document.removeEventListener('keydown', onKeydown);
+    document.removeEventListener('visibilitychange', onVisibility);
 };
 
 onMounted(() => {

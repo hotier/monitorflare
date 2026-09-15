@@ -1,6 +1,6 @@
 <template>
   <div class="min-h-screen flex flex-col text-slate-800 dark:text-slate-200 grid-bg">
-    <StatusHeader :loading="loading" :isDark="isDark" :siteSettings="settings" @toggle-theme="toggleTheme" />
+    <StatusHeader :isDark="isDark" :siteSettings="settings" @toggle-theme="toggleTheme" />
 
     <main class="flex-1 max-w-5xl w-full mx-auto px-6 py-10">
       <!-- 锁屏(私密模式) -->
@@ -279,12 +279,17 @@ const subscribe = async () => {
 // 否则停在别的页面时这里还在每 30 秒打一次接口。
 // start 做成幂等:首次进入时 onMounted 与 onActivated 会连续触发,不能装两个定时器。
 let _timer = null;
+// 60 秒一次:服务端对公开接口有 30s 内存缓存 + 边缘缓存,再快也拿不到更新的数据。
+// 页面切到后台时不轮询,重新可见时立刻补一次。
+const onVisibility = () => { if (!document.hidden && !locked.value) loadMonitors(); };
 const startPolling = () => {
     if (_timer) return;
-    _timer = setInterval(() => { if (!locked.value) loadMonitors(); }, 30000);
+    _timer = setInterval(() => { if (!locked.value && !document.hidden) loadMonitors(); }, 60000);
+    document.addEventListener('visibilitychange', onVisibility);
 };
 const stopPolling = () => {
     if (_timer) { clearInterval(_timer); _timer = null; }
+    document.removeEventListener('visibilitychange', onVisibility);
 };
 
 onMounted(() => {

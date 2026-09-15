@@ -118,10 +118,15 @@ html:not(.dark) .glass {
 
 /* ── 进入动画 ── */
 @keyframes fade-up { from { opacity:0; transform:translateY(20px) scale(0.98); } to { opacity:1; transform:translateY(0) scale(1); } }
-.fade-up    { animation: fade-up 0.6s ease-out forwards; }
-.fade-up-d1 { animation: fade-up 0.6s 0.1s ease-out both; }
-.fade-up-d2 { animation: fade-up 0.6s 0.2s ease-out both; }
-.fade-up-d3 { animation: fade-up 0.6s 0.3s ease-out both; }
+
+/* 元素本身不带隐藏样式:默认就是动画终态,内容不靠动画才看得见。
+   动画只在用户没要求"减少动效"时挂上 —— 否则起始帧 opacity:0 会变成永久状态。 */
+@media (prefers-reduced-motion: no-preference) {
+    .fade-up    { animation: fade-up 0.6s ease-out forwards; }
+    .fade-up-d1 { animation: fade-up 0.6s 0.1s ease-out both; }
+    .fade-up-d2 { animation: fade-up 0.6s 0.2s ease-out both; }
+    .fade-up-d3 { animation: fade-up 0.6s 0.3s ease-out both; }
+}
 
 /* ── 数据刷新闪烁 ── */
 @keyframes data-pulse { 0% { opacity:1; } 50% { opacity:0.5; } 100% { opacity:1; } }
@@ -272,9 +277,13 @@ html:not(.dark) .admin-modal [class*="bg-rose-900"] { background-color: #ffe4e6 
 html:not(.dark) .admin-modal [class*="bg-sky-900"] { background-color: #e0f2fe !important; }
 html:not(.dark) .admin-modal h3,
 html:not(.dark) .admin-modal h4,
+html:not(.dark) .admin-modal h5,
+html:not(.dark) .admin-modal h6,
 html:not(.dark) .admin-modal label,
-html:not(.dark) .admin-modal span.text-white,
-html:not(.dark) .admin-modal p.text-white {
+/* 之前只点名了 span / p:换成 h5、div 这类标签写 text-white 就漏网,
+   浅色弹窗里直接变成"白字 + 浅底"。改用属性选择器一次覆盖所有宿主标签。
+   带 dark: 前缀的类是给深色模式准备的,浅色下不该被这里改写,故排除。 */
+html:not(.dark) .admin-modal [class*="text-white"]:not([class*="dark:"]) {
     color: #0f172a !important;
 }
 html:not(.dark) .admin-modal .text-slate-300 { color: #475569 !important; }
@@ -289,6 +298,24 @@ html:not(.dark) .admin-modal .text-purple-400 { color: #7c3aed !important; }
 html:not(.dark) .admin-modal .text-orange-400,
 html:not(.dark) .admin-modal .text-orange-300 { color: #ea580c !important; }
 html:not(.dark) .admin-modal .text-red-400 { color: #dc2626 !important; }
+/* -300 系和 -400 系同属"深色底上的亮字"。浅色弹窗背景已翻成浅色,还用 300 就是
+   浅字压浅底(徽标、按钮上的 indigo-300 / emerald-300 尤其明显)。按色系压到
+   600/700 级。带 dark: 前缀的类不参与 —— 它们本来就只在深色模式生效。 */
+html:not(.dark) .admin-modal [class*="text-indigo-300"]:not([class*="dark:"]) { color: #4f46e5 !important; }
+html:not(.dark) .admin-modal [class*="text-violet-300"]:not([class*="dark:"]) { color: #7c3aed !important; }
+html:not(.dark) .admin-modal [class*="text-purple-300"]:not([class*="dark:"]) { color: #9333ea !important; }
+html:not(.dark) .admin-modal [class*="text-fuchsia-300"]:not([class*="dark:"]) { color: #c026d3 !important; }
+html:not(.dark) .admin-modal [class*="text-pink-300"]:not([class*="dark:"]) { color: #db2777 !important; }
+html:not(.dark) .admin-modal [class*="text-rose-300"]:not([class*="dark:"]) { color: #e11d48 !important; }
+html:not(.dark) .admin-modal [class*="text-red-300"]:not([class*="dark:"]) { color: #dc2626 !important; }
+html:not(.dark) .admin-modal [class*="text-amber-300"]:not([class*="dark:"]) { color: #b45309 !important; }
+html:not(.dark) .admin-modal [class*="text-yellow-300"]:not([class*="dark:"]) { color: #a16207 !important; }
+html:not(.dark) .admin-modal [class*="text-lime-300"]:not([class*="dark:"]) { color: #4d7c0f !important; }
+html:not(.dark) .admin-modal [class*="text-green-300"]:not([class*="dark:"]) { color: #16a34a !important; }
+html:not(.dark) .admin-modal [class*="text-emerald-300"]:not([class*="dark:"]) { color: #059669 !important; }
+html:not(.dark) .admin-modal [class*="text-teal-300"]:not([class*="dark:"]) { color: #0d9488 !important; }
+html:not(.dark) .admin-modal [class*="text-sky-300"]:not([class*="dark:"]) { color: #0284c7 !important; }
+html:not(.dark) .admin-modal [class*="text-blue-300"]:not([class*="dark:"]) { color: #2563eb !important; }
 html:not(.dark) .admin-modal input:not([type="checkbox"]):not([type="radio"]):not([type="file"]),
 html:not(.dark) .admin-modal textarea,
 html:not(.dark) .admin-modal select {
@@ -384,7 +411,20 @@ html:not(.dark) .search-input:focus { border-color: #22c55e; }
    用自定义类而不是 Tailwind 背景类:上面那批浅色模式的
    [class*="bg-slate-..."] !important 改写只认 Tailwind 类名,认不得这里的轨道/滑块,
    所以深浅两套配色由下面几行自己管,不会被弹窗主题改写规则打到。 */
+/* fixed 会让元素脱离内容区滚动而定位漂移(内容区一滚它就飘到别处,再聚焦反而会
+   触发更莫名其妙的滚动),所以这里改回 absolute,由 label 上的 @mousedown.prevent
+   阻止鼠标点击产生焦点,聚焦滚动从源头消失。 */
 .switch-input { position: absolute; width: 1px; height: 1px; opacity: 0; margin: 0; pointer-events: none; }
+
+/* label 包裹的隐藏 radio/checkbox(检测频率、告警静默、监控类型等)。
+   不要用 sr-only 的 1px 方案:那会让"聚焦滚动"的目标是一个藏在别处的 1px 元素,
+   浏览器为了把它拽进视野会去滚动弹窗的祖先容器 —— 表现就是底部保存按钮跳上来
+   盖住表单。这里让 input 铺满整个可见 label,聚焦目标 == 用户刚点的那个方块,
+   它本来就在视野里,浏览器无需滚动任何容器。要求 label 带 relative。 */
+.focus-safe-input {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    margin: 0; padding: 0; border: 0; appearance: none; opacity: 0; cursor: pointer;
+}
 .switch-track {
     position: relative; flex: 0 0 auto; box-sizing: border-box;
     width: 38px; height: 22px; border-radius: 999px;
@@ -436,7 +476,16 @@ html:not(.dark) .switch-input:focus-visible + .switch-track { box-shadow: 0 0 0 
 }
 
 @media (prefers-reduced-motion: reduce) {
-    *, *::before, *::after, .fade-up, .fade-up-d1, .fade-up-d2 { animation: none !important; transition: none !important; }
+    *, *::before, *::after { animation: none !important; transition: none !important; }
+
+    /* 进入动画的起始帧是 opacity:0,并且用 forwards/both 填充 —— 只把 animation 关掉,
+       元素就会永久停在那一帧。系统开了"减少动效"时,状态页的英雄区、监控列表、
+       订阅卡片会整片不可见(数据其实已经到了,只是看不见)。
+       所以关动画的同时必须显式把它们归位到动画的终态。 */
+    .fade-up, .fade-up-d1, .fade-up-d2, .fade-up-d3 {
+        opacity: 1 !important;
+        transform: none !important;
+    }
 }
 
 /* ── shields.io 风格类型徽章(全局,状态页卡片与详情页共用) ── */

@@ -18,13 +18,13 @@
         ref="panelRef"
         :style="panelStyle"
         class="fixed z-[9999] max-h-64 overflow-y-auto rounded-xl border border-slate-200 dark:border-white/10 bg-white dark:bg-slate-900 shadow-xl"
-        :class="panelClass">
+        :class="[panelClass, optionClass]">
         <button
           v-for="opt in normalizedOptions"
           :key="opt.value"
           type="button"
           @click="pick(opt)"
-          class="w-full flex items-center justify-between gap-3 px-3 py-2 text-xs text-left whitespace-nowrap cursor-pointer text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-white/[0.05]"
+          class="w-full flex items-center justify-between gap-3 px-3 py-2 text-left whitespace-nowrap cursor-pointer text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-white/[0.05]"
           :class="{ 'font-bold text-emerald-600 dark:text-emerald-400': opt.value === modelValue }">
           {{ opt.label }}
           <i v-if="showCheck && opt.value === modelValue" class="fas fa-check text-[9px]"></i>
@@ -41,6 +41,7 @@ import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
  * 通用下拉(与语言切换器同款:触发器 + 圆角浮层列表)
  * variant: field(表单字段) | field-md(中等表单字段) | field-sm(紧凑表单字段) | compact(小胶囊/工具栏)
  * showCheck: 选中项是否显示对钩,默认不显示(语言切换器请自行传 true)
+ * mono: 选项值是代码味的东西(HTTP 方法、DNS 记录类型)时再开;可读文案不要开
  * options: [{ value, label }] 或原始值数组
  */
 const props = defineProps({
@@ -48,6 +49,7 @@ const props = defineProps({
     options:      { type: Array,  required: true },
     variant:      { type: String, default: 'field' },
     showCheck:    { type: Boolean, default: false },
+    mono:         { type: Boolean, default: false },
     align:        { type: String, default: 'left' },
     disabled:     { type: Boolean, default: false },
     triggerClass: { type: String, default: '' },
@@ -68,12 +70,20 @@ const SIZE_CLASS = {
     compact:      'h-8 px-2 rounded-lg text-xs font-medium',
 };
 const COLOR_CLASS = {
-    field:        'font-mono border border-slate-700 bg-slate-800/80 text-white',
+    field:        'border border-slate-700 bg-slate-800/80 text-white',
     compact:      'border border-slate-300 dark:border-slate-700 text-slate-600 dark:text-slate-400 hover:border-emerald-500/60',
+};
+// 浮层选项跟触发器同字号同字体:否则展开后同一个值在框里和列表里像两种东西
+const OPTION_SIZE_CLASS = {
+    field:        'text-sm',
+    'field-md':   'text-sm',
+    'field-sm':   'text-sm',
+    compact:      'text-xs',
 };
 
 const sizeClass = computed(() => SIZE_CLASS[props.variant] || SIZE_CLASS.field);
-const colorClass = computed(() => COLOR_CLASS[props.variant] || COLOR_CLASS.field);
+const colorClass = computed(() => (COLOR_CLASS[props.variant] || COLOR_CLASS.field) + (props.mono ? ' font-mono' : ''));
+const optionClass = computed(() => (OPTION_SIZE_CLASS[props.variant] || OPTION_SIZE_CLASS.field) + (props.mono ? ' font-mono' : ''));
 
 const normalizedOptions = computed(() => props.options.map((o) => (
     o !== null && typeof o === 'object'

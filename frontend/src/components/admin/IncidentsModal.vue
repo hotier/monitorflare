@@ -4,13 +4,13 @@
       <div class="absolute inset-0 bg-black/60 backdrop-blur-sm admin-modal-overlay" @click="emit('close')"></div>
 
       <section class="relative w-full max-w-4xl max-h-[88vh] overflow-hidden flex flex-col glass admin-modal rounded-2xl" style="animation:modal-in 0.25s ease-out">
-        <header class="px-6 py-5 border-b border-white/5 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <header class="px-6 pt-5 pb-4 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div class="flex items-center gap-3">
-            <div class="w-10 h-10 bg-orange-500/15 rounded-xl flex items-center justify-center">
-              <i class="fas fa-flag text-orange-400"></i>
+            <div class="w-9 h-9 rounded-xl bg-orange-500/15 flex items-center justify-center shrink-0">
+              <i class="fas fa-flag text-orange-500 dark:text-orange-400"></i>
             </div>
             <div>
-              <h3 class="text-lg font-bold text-white">{{ $t('incidents.title') }}</h3>
+              <h3 class="text-base font-bold text-white">{{ $t('incidents.title') }}</h3>
               <p class="text-xs text-slate-500">{{ $t('incidents.subtitle') }}</p>
             </div>
           </div>
@@ -93,13 +93,13 @@
                   <span class="text-xs text-slate-500">{{ $t('incidents.selected', { count: form.affected_ids.length }) }}</span>
                 </div>
                 <div v-if="props.monitors.length > 0" class="grid sm:grid-cols-2 gap-2 max-h-40 overflow-y-auto pr-1">
-                  <label v-for="m in props.monitors" :key="m.id" class="flex items-center gap-2 rounded-lg border px-3 py-2 cursor-pointer text-sm transition"
+                  <label v-for="m in props.monitors" :key="m.id" class="relative flex items-center gap-2 rounded-lg border px-3 py-2 cursor-pointer text-sm transition" @mousedown.prevent
                     :class="[
                       form.affected_ids.includes(m.id)
                         ? 'border-cyan-500/40 bg-cyan-500/10 text-cyan-700 dark:text-cyan-200'
                         : 'border-slate-300 dark:border-slate-700 bg-white/70 dark:bg-slate-900/40 text-slate-500 dark:text-slate-400 hover:border-slate-500'
                     ]">
-                    <input type="checkbox" :value="m.id" v-model="form.affected_ids" class="sr-only">
+                    <input type="checkbox" :value="m.id" v-model="form.affected_ids" class="focus-safe-input">
                     <span class="w-2 h-2 rounded-full shrink-0" :class="m.status === 'UP' ? 'bg-emerald-400' : 'bg-red-400'"></span>
                     <span class="truncate">{{ m.name }}</span>
                   </label>
@@ -109,10 +109,10 @@
             </section>
 
             <div class="flex flex-col sm:flex-row sm:items-center gap-3 pt-1">
-              <button type="button" @click="resetForm" class="px-4 py-2.5 rounded-xl border border-slate-700 text-sm font-semibold text-slate-400 hover:text-white hover:bg-white/5 transition cursor-pointer">
+              <button type="button" @click="resetForm" class="inline-flex items-center justify-center px-3 py-2 rounded-xl border border-slate-700 text-xs font-medium text-slate-400 hover:text-white hover:bg-white/5 transition cursor-pointer">
                 {{ $t('common.clear') }}
               </button>
-              <button type="submit" :disabled="submitting" class="sm:ml-auto px-5 py-2.5 rounded-xl text-sm font-semibold text-white transition cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
+              <button type="submit" :disabled="submitting" class="sm:ml-auto inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl border border-transparent text-xs font-bold text-white transition cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
                 :class="form.type === 'maintenance' ? 'bg-cyan-600 hover:bg-cyan-500' : 'bg-orange-600 hover:bg-orange-500'">
                 <i class="fas mr-1.5" :class="submitting ? 'fa-spinner fa-spin' : 'fa-paper-plane'"></i>
                 {{ submitting ? $t('incidents.publishing') : $t('incidents.publishBtn') }}
@@ -223,7 +223,7 @@ const { addToast } = useToast();
 const { confirmDialog } = useConfirm();
 
 // 事件数据来自模块级资源:弹窗关了再开直接渲染缓存,不再每次重新拉
-// 注意用的是 allIncidents(GET /incidents/all),与状态页的 publicIncidents 不是一份
+// 注意用的是 allIncidents(GET /incidents?status=all),与状态页的 publicIncidents 不是一份
 const incidents = computed(() => resources.allIncidents.data.value || []);
 const loading = computed(() => resources.allIncidents.loading.value);
 const submitting = ref(false);

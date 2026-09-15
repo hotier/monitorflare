@@ -13,18 +13,6 @@
         </div>
       </router-link>
       <div class="flex items-center gap-1 sm:gap-4 shrink-0">
-        <!-- LIVE 指示 -->
-        <div class="flex items-center gap-1.5 sm:gap-2 px-1.5 sm:px-3 py-1.5 rounded-full glass text-xs">
-          <div class="relative">
-            <span v-if="!loading" class="w-1.5 h-1.5 rounded-full bg-emerald-400 block"></span>
-            <span v-if="!loading" class="pulse-ring bg-emerald-400/30 block"></span>
-            <svg v-else class="w-3 h-3 animate-spin text-emerald-400" fill="none" viewBox="0 0 24 24">
-              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
-              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/>
-            </svg>
-          </div>
-          <span class="hidden sm:inline text-slate-500 dark:text-slate-400">{{ loading ? $t('statusHeader.syncing') : $t('statusHeader.live') }}</span>
-        </div>
         <!-- 语言切换 -->
         <div class="relative" ref="langRef">
           <button @click="langOpen = !langOpen" :title="$t('languages.' + locale)" class="flex items-center gap-1 h-8 px-1.5 sm:px-2 rounded-lg text-xs font-medium text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-black/[0.06] dark:hover:bg-white/[0.06] transition-all cursor-pointer">
@@ -67,7 +55,6 @@ import { useI18n } from 'vue-i18n';
 import { setAppLanguage } from '../../main';
 
 defineProps({
-    loading: Boolean,
     isDark: Boolean,
     siteSettings: Object,
 });

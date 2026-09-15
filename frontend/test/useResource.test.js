@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { defineResource, resetResources } from '../src/composables/useResource';
+import { defineResource, defineResourceFamily, resetResources } from '../src/composables/useResource';
 
 /** 快照配置的简写 */
 const snap = (key, extra = {}) => ({ key, version: 1, maxAge: 24 * 3600_000, ...extra });
@@ -270,5 +270,66 @@ describe('首屏快照', () => {
         });
         await res.ensure();
         expect(localStorage.getItem('k_s8')).toBe(null);
+    });
+});
+
+describe('资源族(参数化资源)', () => {
+    /** 造一个 (id, range) 二维参数的族,数据就是参数本身 */
+    const makeFamily = (prefix, extra = {}) => defineResourceFamily(prefix, {
+        key: ({ id, range }) => `${id}:${range}`,
+        build: ({ id, range }) => ({ fetcher: async () => ({ id, range }) }),
+        ...extra,
+    });
+
+    it('不同参数各一份实例,数据互不串', async () => {
+        const family = makeFamily('f1');
+        const a = family({ id: 1, range: '24h' });
+        const b = family({ id: 1, range: '7d' });
+        const c = family({ id: 2, range: '24h' });
+        expect(a).not.toBe(b);
+        await Promise.all([a.ensure(), b.ensure(), c.ensure()]);
+        expect(a.data.value).toEqual({ id: 1, range: '24h' });
+        expect(b.data.value).toEqual({ id: 1, range: '7d' });
+        expect(c.data.value).toEqual({ id: 2, range: '24h' });
+    });
+
+    it('相同参数复用同一实例,新鲜期内不重复取数', async () => {
+        let calls = 0;
+        const family = defineResourceFamily('f2', {
+            key: ({ id }) => String(id),
+            build: () => ({ ttl: 60_000, fetcher: async () => { calls++; return calls; } }),
+        });
+        const first = family({ id: 9 });
+        await first.ensure();
+        await family({ id: 9 }).ensure();
+        expect(calls).toBe(1);
+        expect(family({ id: 9 })).toBe(first);
+    });
+
+    it('超过上限按 FIFO 淘汰最早的实例', async () => {
+        const family = makeFamily('f3', { max: 2 });
+        const a = family({ id: 1, range: '24h' });
+        await a.ensure();
+        await family({ id: 2, range: '24h' }).ensure();
+        const c = family({ id: 3, range: '24h' });
+        await c.ensure();
+
+        // 2、3 仍在(命中已有实例不会改变淘汰顺序)
+        expect(family({ id: 2, range: '24h' }).data.value).toEqual({ id: 2, range: '24h' });
+        expect(family({ id: 3, range: '24h' })).toBe(c);
+        // 1 已被淘汰:再取就是全新实例,数据为空
+        const a2 = family({ id: 1, range: '24h' });
+        expect(a2).not.toBe(a);
+        expect(a2.data.value).toBe(null);
+    });
+
+    it('resetResources 连族一起清,下次取到的是新实例', async () => {
+        const family = makeFamily('f4');
+        const a = family({ id: 1, range: '24h' });
+        await a.ensure();
+        resetResources();
+        const a2 = family({ id: 1, range: '24h' });
+        expect(a2).not.toBe(a);
+        expect(a2.data.value).toBe(null);
     });
 });

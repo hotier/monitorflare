@@ -1,6 +1,6 @@
 <template>
   <div class="min-h-screen flex flex-col text-slate-800 dark:text-slate-200 grid-bg">
-    <StatusHeader :loading="loading" :isDark="isDark" :siteSettings="siteSettings" @toggle-theme="toggleTheme" />
+    <StatusHeader :isDark="isDark" :siteSettings="siteSettings" @toggle-theme="toggleTheme" />
 
     <main class="flex-1 max-w-5xl w-full mx-auto px-6 py-8">
       <!-- 返回 + 错误 -->
@@ -171,7 +171,7 @@
               <span>{{ lastPointLabel }}</span>
             </div>
           </div>
-          <p v-else class="text-xs text-slate-400 dark:text-slate-600">{{ $t('monitorDetail.noData') }}</p>
+          <p v-else class="text-xs text-slate-400 dark:text-slate-600">{{ loading ? $t('common.loading') : $t('monitorDetail.noData') }}</p>
         </div>
 
         <!-- 最近检查日志 -->
@@ -257,11 +257,10 @@ import { ref, computed, watch, onMounted, onActivated, onDeactivated, onUnmounte
 import { useRoute } from 'vue-router';
 import { useI18n } from 'vue-i18n';
 import { useTheme } from '../composables/useTheme';
-import { API_BASE, fetchT, withRetry } from '../utils/api';
 import {
     formatDate, formatDateFull, formatDateTime, getExpiryClass, formatExpiry, formatExpiryDate, latencyTextClass, latencyTipClass, statusBadgeClass,
 } from '../utils/format';
-import { isStatusLocked, statusLogout, STATUS_TOKEN_KEY } from '../utils/api';
+import { statusLogout, STATUS_TOKEN_KEY } from '../utils/api';
 // 站点配置与状态页共用同一份模块级资源,不再各拉一遍
 import * as resources from '../composables/resources';
 
@@ -277,30 +276,48 @@ const { isDark, toggleTheme } = useTheme('theme');
 /** 资源首次加载完成前 data 是 null,模板直接取字段会报错 —— 用默认值兜底 */
 const DEFAULT_SETTINGS = { site_title: 'MonitorFlare', site_description: '', site_logo_url: '' };
 
-// 详情数据没有做成模块级资源:常态路径是"列表 → 详情 → 返回 → 再进同一个详情",
-// keep-alive 保住这一个实例就够了,不为"看过的其他监控"再建一层 LRU 缓存。
-const monitor = ref(null);
-const logs = ref([]);
-const latencySeries = ref([]);
-const incidents = ref([]);
-// 初值给 false:交给 loadDetail 在 onMounted 里同步置 true。
-// Vue 会把这次赋值和首次渲染放在同一批里提交,不会闪出没有骨架屏的白屏。
-const loading = ref(false);
-const refreshing = ref(false);
-const notFound = ref(false);
 const range = ref('24h');
 const statusToken = ref(localStorage.getItem(STATUS_TOKEN_KEY) || '');
-const seriesCache = {};
 const hoverIdx = ref(null);
 const pinIdx = ref(null);
 /** 当前这个实例里装的是哪个监控的数据。keep-alive 下实例会被不同 :id 复用 */
 const loadedId = ref('');
 /** 手动锁定(主动退出)与资源 401 锁定取或 */
 const forceLocked = ref(false);
-const locked = computed(() => forceLocked.value || resources.siteSettings.locked.value);
+/** 手动刷新时让转圈至少转够一眼,否则点下去常常毫无反馈 */
+const manualSpin = ref(false);
+
+// ── 详情数据 ──
+//
+// 做成模块级资源(按 id + range 分 key),而不是组件级 ref:
+//   1. 组件级 ref 在离开页面时就随组件一起走,keep-alive 又只保得住"最后一个 id"。
+//      于是"状态页 → 详情 A → 返回 → 详情 B"每一步都要重拉最重的那个公开接口,
+//      还要整页骨架一次;
+//   2. 数据有了主人之后,loading / refreshing / 并发去重 / TTL 全归资源层操心,
+//      组件只读 —— 也就不会再出现"明明有数据却闪骨架屏"。
+const detail = computed(() => resources.monitorDetail({ id: monitorId.value, range: range.value }));
+
+/**
+ * 状态页那份列表里已经有这条监控的摘要(名称 / 状态 / 可用率 / 90 天柱状图),
+ * 详情请求落地之前先拿它渲染 —— 从列表点进来看到的是内容展开,而不是骨架屏。
+ * 请求回来后自动切到字段更全的详情数据。
+ */
+const summary = computed(() => {
+    const list = resources.publicMonitors.data.value?.monitors;
+    if (!list) return null;
+    return list.find(m => String(m.id) === String(monitorId.value)) || null;
+});
+
+const monitor = computed(() => detail.value.data.value?.monitor || summary.value);
+const logs = computed(() => detail.value.data.value?.logs || []);
+const latencySeries = computed(() => detail.value.data.value?.latency_series || []);
+const incidents = computed(() => detail.value.data.value?.incidents || []);
+const notFound = computed(() => !!detail.value.data.value?.notFound);
+/** 手上已经有东西可显示(详情数据或列表摘要)时就不进骨架屏 */
+const loading = computed(() => detail.value.loading.value && !monitor.value);
+const refreshing = computed(() => detail.value.refreshing.value || manualSpin.value);
+const locked = computed(() => forceLocked.value || resources.siteSettings.locked.value || detail.value.locked.value);
 const siteSettings = computed(() => resources.siteSettings.data.value || DEFAULT_SETTINGS);
-/** 上次拉详情的时间,用于"切回来时数据够不够新"的判断 */
-let lastLoadAt = 0;
 
 const monitorId = computed(() => String(route.params.id));
 
@@ -370,27 +387,14 @@ const ranges = computed(() => [
     { key: '30d', label: t('monitorDetail.range30d') },
 ]);
 
+// 区间本身就是资源 key 的一部分:切到看过的区间直接命中缓存,切到没看过的才发请求。
+// 区间在加载中时图表显示"加载中"而不是"暂无数据" —— 后者会让人以为这个监控没数据。
 const selectRange = (key) => {
-    if (range.value === key && seriesPoints.value.length > 0) return;
+    if (range.value === key) return;
     range.value = key;
     hoverIdx.value = null;
     pinIdx.value = null;
-    loadSeries(key);
-};
-
-const loadSeries = async (r) => {
-    if (seriesCache[r]) {
-        if (range.value === r) latencySeries.value = seriesCache[r];
-        return;
-    }
-    try {
-        const res = await fetchT(`${API_BASE}/monitors/public/${monitorId.value}?range=${r}&limit=1`);
-        if (res.ok) {
-            const data = await res.json();
-            seriesCache[r] = data.latency_series || [];
-            if (range.value === r) latencySeries.value = seriesCache[r];
-        }
-    } catch { /* keep old */ }
+    loadDetail();
 };
 
 const W = 800, H = 176, P = 8;
@@ -532,65 +536,28 @@ const incidentStatusLabel = (inc) => {
 };
 
 /**
- * 切到另一个监控时,把上一个监控的数据彻底清掉
+ * 切到另一个监控时,清掉绑定在"上一个监控"上的视图状态
  *
- * 不做这一步的后果:keep-alive 复用了同一个实例,页面上会先闪出
- * "上一个监控的内容 + 当前 URL"的错配,这是实例复用最典型的脏数据 bug。
+ * 数据本身不用清:detail 是按 id 取的资源,换 id 自动换到另一份。以前要在这里
+ * 逐个清空 ref,是因为数据就长在组件上 —— 不清就会闪出"上一个监控的内容 + 当前
+ * URL"的错配,这是实例复用最典型的脏数据 bug。
  */
 const resetFor = (id) => {
     loadedId.value = id;
-    monitor.value = null;
-    logs.value = [];
-    incidents.value = [];
-    latencySeries.value = [];
-    // 序列缓存是按区间存的,内容却属于上一个监控 —— 不清会串数据
-    for (const k of Object.keys(seriesCache)) delete seriesCache[k];
     hoverIdx.value = null;
     pinIdx.value = null;
     range.value = '24h';
-    notFound.value = false;
-    lastLoadAt = 0;
 };
 
-const loadDetail = async () => {
-    const id = monitorId.value;
-    if (!id) return;
-    lastLoadAt = Date.now();
-    loading.value = true;
-    notFound.value = false;
-    try {
-        const res = await withRetry(() => fetchT(`${API_BASE}/monitors/public/${id}?range=${range.value}&limit=50`));
-        if (await isStatusLocked(res)) {
-            forceLocked.value = true;
-            monitor.value = null;
-            return;
-        }
-        if (res.status === 404) {
-            notFound.value = true;
-            monitor.value = null;
-            return;
-        }
-        if (res.ok) {
-            const data = await res.json();
-            // 竞态保护:请求期间用户可能已经切到别的监控了,晚到的响应不能覆盖新数据
-            if (monitorId.value !== id) return;
-            monitor.value = data.monitor;
-            logs.value = data.logs || [];
-            incidents.value = data.incidents || [];
-            seriesCache[range.value] = data.latency_series || [];
-            latencySeries.value = seriesCache[range.value];
-        }
-    } catch {
-        // 保留已有内容:网络抖一下不该把渲染好的页面清掉
-    } finally {
-        loading.value = false;
-    }
+/** 取数:新鲜期内直接返回,过期才发请求 */
+const loadDetail = () => {
+    if (!monitorId.value) return Promise.resolve();
+    return detail.value.ensure();
 };
-
-/** 距上次拉取不足 30 秒就不重复拉 —— onMounted 与 onActivated 会连续触发 */
-const revalidate = () => {
-    if (Date.now() - lastLoadAt < 30000) return;
-    loadDetail();
+/** 强制重拉:手动刷新、从后台切回、私密模式解锁 */
+const reloadDetail = () => {
+    if (!monitorId.value) return Promise.resolve();
+    return detail.value.refresh();
 };
 
 /** 标题要同时带上站点名和监控名,两者都是异步到的,所以单独抽出来反复调用 */
@@ -610,24 +577,23 @@ const onUnlocked = () => {
     statusToken.value = localStorage.getItem(STATUS_TOKEN_KEY) || '';
     // 解锁换了 token,之前被 401 挡下的配置要清掉重来
     resources.siteSettings.invalidate();
-    loadDetail();
+    reloadDetail();
     fetchSettings();
 };
 
 const onLogout = () => {
     statusLogout();
     statusToken.value = '';
-    monitor.value = null;
-    logs.value = [];
-    incidents.value = [];
+    // 私密站点:退出前先把手里这份公开详情清掉,别留在内存里
+    detail.value.invalidate();
     forceLocked.value = true;
     window.scrollTo({ top: 0 });
 };
 
 const manualRefresh = async () => {
-    refreshing.value = true;
-    await loadDetail();
-    setTimeout(() => { refreshing.value = false; }, 700);
+    manualSpin.value = true;
+    await reloadDetail();
+    setTimeout(() => { manualSpin.value = false; }, 700);
 };
 
 watch([siteSettings, monitor], applyTitle, { immediate: true });
@@ -641,14 +607,19 @@ watch(monitorId, (id) => {
 
 // ── 轮询的启停 ──
 // keep-alive 下 onUnmounted 不会触发,清理必须挂到 onDeactivated,否则停在列表页时
-// 这里还在每 30 秒拉一次详情。start 做成幂等:首次进入时 mounted 与 activated 连续触发。
+// 这里还在每分钟拉一次详情。start 做成幂等:首次进入时 mounted 与 activated 连续触发。
 let _timer = null;
+// 60 秒一次:服务端对公开接口有 30s 内存缓存 + 边缘缓存,再快也是拿到同一份数据。
+// 后台标签页不轮询,重新可见时立刻补一次。
+const onVisibility = () => { if (!document.hidden && !locked.value) reloadDetail(); };
 const startPolling = () => {
     if (_timer) return;
-    _timer = setInterval(() => { if (!locked.value) loadDetail(); }, 30000);
+    _timer = setInterval(() => { if (!locked.value && !document.hidden) loadDetail(); }, 60000);
+    document.addEventListener('visibilitychange', onVisibility);
 };
 const stopPolling = () => {
     if (_timer) { clearInterval(_timer); _timer = null; }
+    document.removeEventListener('visibilitychange', onVisibility);
 };
 
 onMounted(() => {
@@ -660,7 +631,7 @@ onMounted(() => {
 onActivated(() => {
     startPolling();
     applyTitle();      // 从状态页回来时标题被改成了站点名,要盖回来
-    revalidate();      // 数据超过 30 秒才静默刷新,有数据时不会闪骨架屏
+    loadDetail();      // 新鲜期内什么都不做,过期才静默刷新,绝不闪骨架屏
     fetchSettings();
 });
 onDeactivated(stopPolling);

@@ -23,6 +23,9 @@ const SNAPSHOT_MAX_BYTES = 512 * 1024;
 /** key -> 资源实例。模块级,跨组件共享 */
 const registry = new Map();
 
+/** 资源族(FIFO 队列)列表,仅供测试清空 */
+const families = [];
+
 /**
  * 构造持久化读写(首屏快照)
  *
@@ -76,9 +79,12 @@ function createSnapshotStore(persist) {
  * @param {number}  [options.ttl]     新鲜期(毫秒)。期内重复 ensure 不发请求
  * @param {object}  [options.persist] 首屏快照配置 { key, version, maxAge, pick }
  */
-export function defineResource(key, { fetcher, ttl = 0, persist = null } = {}) {
+export function defineResource(key, options = {}) {
     if (registry.has(key)) return registry.get(key);
+    return createResource(key, options);
+}
 
+function createResource(key, { fetcher, ttl = 0, persist = null } = {}) {
     const store = persist ? createSnapshotStore(persist) : null;
 
     // 注意:这里必须是深响应式 ref,不能图省事用 shallowRef。
@@ -166,7 +172,40 @@ export function defineResource(key, { fetcher, ttl = 0, persist = null } = {}) {
     return api;
 }
 
+/**
+ * 参数化资源族:同一族内按参数各建一份资源
+ *
+ * 与 defineResource 的区别:defineResource 的 key 是写死的常量,适合"全站只有一份"的
+ * 数据(settings / 列表)。而"监控详情"是同一个接口、不同参数 —— 用 defineResource
+ * 就得在调用点拼字符串 key,去重逻辑散落各处;族把它收口到这里。
+ *
+ * 上限是必须的:参数组合(id × range)可以无限增长,而监控详情页的数据量不小。
+ * 超上限按 FIFO 丢最早的 —— 看过的页面才是会被回看的页面。
+ *
+ * @param {string}   prefix
+ * @param {object}   options
+ * @param {Function} options.key    (params) => string,族内唯一
+ * @param {Function} options.build   (params) => defineResource 的 options
+ * @param {number}   [options.max]   保留的实例数上限
+ * @returns {(params) => 资源实例}
+ */
+export function defineResourceFamily(prefix, { key, build, max = 24 } = {}) {
+    const order = [];
+    families.push(order);
+
+    return (params) => {
+        const k = `${prefix}:${key(params)}`;
+        if (!registry.has(k)) {
+            while (order.length >= Math.max(max, 1)) registry.delete(order.shift());
+            order.push(k);
+            createResource(k, build(params));
+        }
+        return registry.get(k);
+    };
+}
+
 /** 仅供测试:清空注册表,避免用例之间互相污染 */
 export function resetResources() {
     registry.clear();
+    for (const order of families) order.length = 0;
 }

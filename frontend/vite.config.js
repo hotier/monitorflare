@@ -73,7 +73,9 @@ export default defineConfig(({ mode }) => {
 
     server: {
       proxy: {
-        '/api': {
+        // 必须用 ^ 开头的正则:普通的 '/api' 是纯前缀匹配,连前端路由 /api-docs
+        // 都会被代理到 worker,文档页直接吃一个 404。这里只放行 /api 本身和 /api/xxx。
+        '^/api(/|$)': {
           target: env.VITE_WORKER_URL || 'http://127.0.0.1:8787',
           changeOrigin: true,
           rewrite: (path) => path.replace(/^\/api/, ''),

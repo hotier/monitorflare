@@ -4,13 +4,13 @@
       <div class="absolute inset-0 bg-black/60 backdrop-blur-sm admin-modal-overlay" @click="emit('close')"></div>
 
       <section class="relative w-full max-w-2xl max-h-[88vh] overflow-hidden flex flex-col glass admin-modal rounded-2xl" style="animation:modal-in 0.25s ease-out">
-        <header class="px-6 py-5 border-b border-white/5 flex items-center justify-between gap-4">
+        <header class="px-6 pt-5 pb-4 flex items-center justify-between gap-4">
           <div class="flex items-center gap-3">
-            <div class="w-10 h-10 bg-emerald-500/15 rounded-xl flex items-center justify-center">
-              <i class="fas fa-key text-emerald-400"></i>
+            <div class="w-9 h-9 rounded-xl bg-emerald-500/15 flex items-center justify-center shrink-0">
+              <i class="fas fa-key text-emerald-500 dark:text-emerald-400"></i>
             </div>
             <div>
-              <h3 class="text-lg font-bold text-white">{{ $t('apiKeys.title') }}</h3>
+              <h3 class="text-base font-bold text-white">{{ $t('apiKeys.title') }}</h3>
               <p class="text-xs text-slate-500">{{ $t('apiKeys.subtitle') }}</p>
             </div>
           </div>
@@ -20,14 +20,31 @@
         </header>
 
         <div class="flex-1 min-h-0 overflow-y-auto p-5 sm:p-6 space-y-6">
+          <!-- 文档引导:建 key 的人下一步就是去调接口,把说明页入口放在最上面。
+               整张卡片不可点:误触会离开弹窗,而刚生成的明文密钥只展示一次。
+               只有右侧按钮带 target=_blank,跳到新标签页,当前弹窗和密钥都不丢。
+               浅色配色沿用本弹窗已验证的组合(bg-slate-800/40 + text-slate-500),
+               不用 emerald 文字 —— base.css 没有为 .admin-modal 覆写 emerald,浅底上看不清。 -->
+          <div class="flex items-center gap-3 rounded-xl border border-slate-700 bg-slate-800/40 p-3.5">
+            <i class="fas fa-book-open text-slate-400 shrink-0"></i>
+            <div class="min-w-0 flex-1">
+              <p class="text-xs text-slate-500 leading-relaxed">{{ $t('apiKeys.guideDesc') }}</p>
+            </div>
+            <router-link to="/api-docs" target="_blank" rel="noopener"
+              class="shrink-0 inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold bg-emerald-100 text-emerald-700 hover:bg-emerald-200 transition cursor-pointer dark:bg-emerald-500/20 dark:text-emerald-300 dark:hover:bg-emerald-500/30">
+              {{ $t('apiKeys.guideAction') }}
+              <i class="fas fa-arrow-up-right-from-square text-[9px]"></i>
+            </router-link>
+          </div>
+
           <!-- 创建 key -->
           <section class="space-y-3">
             <h4 class="text-sm font-semibold text-white">{{ $t('apiKeys.createTitle') }}</h4>
             <div class="flex gap-2">
               <input v-model.trim="newKeyName" :placeholder="$t('apiKeys.namePlaceholder')"
-                class="flex-1 border border-slate-700 rounded-xl px-3 py-2.5 text-sm bg-slate-800/80 text-white focus:border-emerald-500 outline-none">
+                class="flex-1 h-[34px] border border-slate-700 rounded-xl px-3 text-sm bg-slate-800/80 text-white focus:border-emerald-500 outline-none">
               <button @click="createKey" :disabled="creating || !newKeyName"
-                class="px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold transition cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2">
+                class="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl border border-transparent bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold transition cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed">
                 <i class="fas" :class="creating ? 'fa-spinner fa-spin' : 'fa-plus'"></i>
                 {{ $t('apiKeys.create') }}
               </button>
@@ -74,34 +91,6 @@
               </div>
             </div>
           </section>
-
-          <!-- 用法示例(可收起展开) -->
-          <section class="space-y-3">
-            <!-- 按钮嵌在 h4 内:既是小标题,又能整行点击切换(ARIA disclosure 模式) -->
-            <h4 class="text-sm font-semibold text-white">
-              <button type="button" @click="usageOpen = !usageOpen"
-                class="group flex w-full items-center justify-between gap-2 cursor-pointer"
-                :aria-expanded="usageOpen" aria-controls="api-keys-usage"
-                :title="usageOpen ? $t('apiKeys.usageCollapse') : $t('apiKeys.usageExpand')">
-                <span>{{ $t('apiKeys.usageTitle') }}</span>
-                <i class="fas fa-chevron-down text-[10px] text-slate-500 transition-transform duration-200"
-                  :class="{ 'rotate-180': usageOpen }" aria-hidden="true"></i>
-              </button>
-            </h4>
-            <p class="text-xs text-slate-500">{{ $t('apiKeys.usageHint') }}</p>
-            <!-- 0fr ↔ 1fr 过渡:不需要 JS 量高度;收起时 aria-hidden 把它移出无障碍树 -->
-            <div id="api-keys-usage" class="grid transition-all duration-300 ease-out"
-              :class="usageOpen ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0'"
-              :aria-hidden="!usageOpen">
-              <div class="overflow-hidden">
-                <!-- 浅色模式要显式给出亮底:base.css 只覆写了 bg-slate-900/800,这里的 slate-950 不在其中,
-                     但 text-slate-300 会被覆写成 #475569 —— 深灰字压近黑底,等于看不清 -->
-                <div class="rounded-xl bg-slate-100 border border-slate-200 dark:bg-slate-950/60 dark:border-slate-800 p-4 overflow-x-auto">
-                  <pre class="text-[11px] font-mono text-slate-700 dark:text-slate-300 leading-relaxed">{{ usageExample }}</pre>
-                </div>
-              </div>
-            </div>
-          </section>
         </div>
       </section>
     </div>
@@ -129,28 +118,6 @@ const newKey = ref('');
 const creating = ref(false);
 const deletingId = ref(null);
 const copied = ref(false);
-// 用法示例默认收起(想默认展开改成 ref(true) 即可)
-const usageOpen = ref(false);
-
-const usageExample = computed(() => {
-    const o = location.origin;
-    return `# ${t('apiKeys.usageComment1')}
-curl -H "Authorization: Bearer ut_your_key" \\
-  ${o}/api/v1/monitors
-
-# ${t('apiKeys.usageComment2')}
-curl -H "Authorization: Bearer ut_your_key" \\
-  "${o}/api/v1/logs?monitor_id=1&limit=100&offset=0&since=2026-01-01"
-
-# ${t('apiKeys.usageComment3')}
-curl -H "Authorization: Bearer ut_your_key" ${o}/api/v1/incidents
-
-# ${t('apiKeys.usageComment4')}
-curl -H "Authorization: Bearer ut_your_key" "${o}/api/v1/uptime?days=90"
-
-# ${t('apiKeys.usageComment5')}
-curl -H "Authorization: Bearer ut_your_key" ${o}/api/v1/export`;
-});
 
 /** 手动刷新(增删之后) */
 const fetchKeys = () => resources.apiKeys.refresh();

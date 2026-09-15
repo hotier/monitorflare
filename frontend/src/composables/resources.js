@@ -9,7 +9,7 @@
 // 新增资源前先确认:这个端点是否已经被别的页面拉过?如果是,务必复用同一份,
 // 否则又会出现"同一个人被 4 处各拉一遍"的老问题(/settings 就是这么来的)。
 // ============================================================
-import { defineResource } from './useResource';
+import { defineResource, defineResourceFamily } from './useResource';
 import { API_BASE, authFetchT, fetchT, withRetry, isStatusLocked } from '../utils/api';
 import { adminToken } from './useAuth';
 
@@ -85,16 +85,48 @@ export const siteSettings = defineResource('settings', {
 /**
  * 公开监控列表(含 90 天可用率、最近延迟)
  *
- * 状态页和管理页都要它。ttl 15 秒:页面本身 30 秒轮询一次,15 秒足够覆盖
- * "切走再切回"的间隔,又不至于拿太旧的状态糊弄人。
+ * 状态页和管理页都要它。ttl 对齐服务端的公开接口缓存(30 秒):比它再短没有意义 ——
+ * 拿到的会是同一份快照,只是多打一次请求。
  */
 export const publicMonitors = defineResource('monitors-public-details', {
-    ttl: 15_000,
+    ttl: 30_000,
     persist: { key: 'monitorflare_snapshot_monitors', version: 1, maxAge: 24 * 3600_000 },
     fetcher: async () => {
-        const res = await withRetry(() => fetchT(`${API_BASE}/monitors/public/details`));
+        const res = await withRetry(() => fetchT(`${API_BASE}/monitors/public?detail=1`));
         return readPublic(res, 'monitors');
     },
+});
+
+/**
+ * 单监控详情(基础信息 + 可用率 + 延迟曲线 + 日志 + 事件)
+ *
+ * 按 id + range 分 key:区间不同就是不同的数据集,切回看过的区间应该直接命中。
+ * ttl 同样对齐服务端 30 秒。
+ *
+ * **刻意不落 localStorage**:一份 24h 详情含 288 个曲线点 + 50 条日志,约数十 KB,
+ * 二十几份就能吃掉配额的一大块;它还是私密站点里信息量最大的一份数据。
+ * 冷启动打开详情链接靠"状态页那份列表预填"顶上,不靠快照。
+ *
+ * 上限 24:够覆盖"逐个点开十几个监控再回看",再多用 FIFO 淘汰。
+ */
+export const monitorDetail = defineResourceFamily('monitor-detail', {
+    key: ({ id, range }) => `${id}:${range}`,
+    build: ({ id, range = '24h', limit = 50 }) => ({
+        ttl: 30_000,
+        fetcher: async () => {
+            const res = await withRetry(() => fetchT(`${API_BASE}/monitors/public/detail?id=${id}&range=${range}&limit=${limit}`));
+            // 404 不是错误,是"这个 id 不存在"这个事实 —— 交给视图渲染未找到页
+            if (res.status === 404) return { notFound: true };
+            const data = await readPublic(res, 'monitor');
+            return {
+                monitor: data.monitor || null,
+                logs: data.logs || [],
+                incidents: data.incidents || [],
+                latency_series: data.latency_series || [],
+            };
+        },
+    }),
+    max: 24,
 });
 
 /** 公开事件(只含 status = active,状态页公告用) */
@@ -106,15 +138,25 @@ export const publicIncidents = defineResource('incidents-public', {
     },
 });
 
-/** 管理端监控列表(含配置字段,鉴权) */
+/**
+ * 管理端监控列表(含配置字段,鉴权)
+ *
+ * 响应是 { monitors: [...] } 而不是裸数组:同一个端点还能靠
+ * ?include=logs,stats 附带日志与可用率,列表只是其中一份。
+ * 未登录时 adminGet 返回 null,这里要原样透传 —— 依赖 data 为 null
+ * 判断"还没加载过"的逻辑还在用。
+ */
 export const adminMonitors = defineResource('monitors-admin', {
     ttl: 15_000,
-    fetcher: () => adminGet('/monitors', 'monitors'),
+    fetcher: async () => {
+        const d = await adminGet('/monitors', 'monitors');
+        return d ? d.monitors : null;
+    },
 });
 
-/** 自检信息 */
+/** 自检信息。状态栏里看的东西,跟着 60 秒的轮询节奏走 */
 export const health = defineResource('health', {
-    ttl: 30_000,
+    ttl: 60_000,
     fetcher: () => adminGet('/health', 'health'),
 });
 
@@ -128,11 +170,12 @@ export const notificationChannels = defineResource('notification-channels', {
  * 管理端事件全量列表
  *
  * 注意与 publicIncidents 的区别:那是 GET /incidents(只返回 active),
- * 这是 GET /incidents/all(管理员视角的全量)。端点不同、用途不同,不能合并。
+ * 这是 GET /incidents?status=all(管理员视角的全量)。同一个端点的两种口径,
+ * 参数不同而已,不能当成同一份缓存。
  */
 export const allIncidents = defineResource('incidents-all', {
     ttl: 30_000,
-    fetcher: () => adminGet('/incidents/all', 'incidents'),
+    fetcher: () => adminGet('/incidents?status=all', 'incidents'),
 });
 
 /** API 密钥。含明文密钥的只有创建响应,列表本身是安全的 */

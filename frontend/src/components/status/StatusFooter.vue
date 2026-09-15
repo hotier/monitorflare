@@ -2,9 +2,8 @@
   <footer class="border-t border-black/[0.06] dark:border-white/[0.04] py-3 mt-4">
     <div class="max-w-5xl mx-auto px-6 grid grid-cols-1 md:grid-cols-3 items-center gap-4 text-xs text-slate-500 dark:text-slate-500">
       <div class="hidden md:block"></div>
-      <div class="flex items-center justify-center gap-2">
-        <div class="w-1 h-1 rounded-full bg-emerald-500/40"></div>
-        <p>&copy; {{ new Date().getFullYear() }} <a :href="footerUrl" target="_blank" class="hover:text-slate-700 dark:hover:text-slate-400 transition-colors">{{ footerAuthor }}</a>. {{ $t('footer.allRightsReserved') }}</p>
+      <div class="flex items-center justify-center">
+        <p class="text-center">&copy; {{ new Date().getFullYear() }} <a :href="footerUrl" target="_blank" class="hover:text-slate-700 dark:hover:text-slate-400 transition-colors">{{ footerAuthor }}</a>. {{ $t('footer.allRightsReserved') }}</p>
       </div>
       <div v-if="canLogout" class="flex items-center justify-center md:justify-self-end gap-5">
         <button @click="confirmLogout" class="flex items-center gap-1.5 text-slate-500 dark:text-slate-500 hover:text-red-500 dark:hover:text-red-400 transition-colors cursor-pointer" :title="$t('statusLock.logout')">
