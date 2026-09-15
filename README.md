@@ -46,7 +46,7 @@ MonitorFlare is a self-hosted uptime monitoring platform with a beautiful public
 - **One-click deploy** via the Deploy to Cloudflare button — no CLI needed
 - **Auto-initialization**: D1 schema created on first request
 - **Multiple sign-in methods**: admin API key · email magic link · Google · GitHub · Cloudflare Access
-- **Open API**: `GET /api/status`, `GET /feed.xml`, `GET /monitors/public/:id` (`?range` / `?limit`), inbound webhooks; public monitor payloads include `check_ssl` / `check_domain`
+- **Open API**: `GET /api/status`, `GET /feed.xml`, `GET /monitors/public` (optional `?id=1` / `?ids=1,2,3` to fetch specific monitors, server-side filtered), `GET /monitors/public/:id` (`?range` / `?limit`), inbound webhooks; public monitor payloads include `check_ssl` / `check_domain`
 - **Backup & restore** (JSON export, optional R2 daily backups)
 - API keys for third-party integrations
 

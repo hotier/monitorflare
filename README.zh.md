@@ -43,7 +43,7 @@
 - **一键部署**:通过 Deploy to Cloudflare 按钮,无需 CLI
 - **自动初始化**:首次请求自动创建 D1 schema
 - **一键登录**:Admin API key · Email magic link · Google · GitHub · Cloudflare Access
-- **开放 API**:`GET /api/status`、`GET /feed.xml`、`GET /monitors/public/:id`(`?range`/`?limit`)、入站 webhooks；公开监控数据含 `check_ssl`/`check_domain` 字段
+- **开放 API**:`GET /api/status`、`GET /feed.xml`、`GET /monitors/public`(可选 `?id=1`/`?ids=1,2,3` 只取指定监控,服务端过滤)、`GET /monitors/public/:id`(`?range`/`?limit`)、入站 webhooks；公开监控数据含 `check_ssl`/`check_domain` 字段
 - **备份与恢复**(JSON 导出,可选 R2 每日备份)
 - 面向第三方集成的 API keys
 
