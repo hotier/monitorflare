@@ -50,3 +50,29 @@ export function localHour(timeZone: string, at: Date = new Date()): number {
   const shifted = at.getTime() + tzOffsetMinutes(timeZone, at) * MINUTE_MS;
   return new Date(shifted).getUTCHours();
 }
+
+/**
+ * 目标时区下的"小时桶"键,格式 YYYY-MM-DDTHH(如 2026-09-15T08)。
+ *
+ * 这是 monitor_hourly 表的主键后缀:字典序 == 时间序,所以 hour 之间可以直接
+ * 用 >= / < 比较,而不必对列套函数(那会让索引失效)。
+ */
+export function localHourString(timeZone: string, at: Date = new Date()): string {
+  const shifted = at.getTime() + tzOffsetMinutes(timeZone, at) * MINUTE_MS;
+  return new Date(shifted).toISOString().slice(0, 13);
+}
+
+/** 本地时区下"hours 小时之前"对应的小时桶键 */
+export function localHourAgo(timeZone: string, hours: number, at: Date = new Date()): string {
+  return localHourString(timeZone, new Date(at.getTime() - hours * 3600_000));
+}
+
+/** 本地时区下 days 天之前的日期 YYYY-MM-DD */
+export function localDateAgo(timeZone: string, days: number, at: Date = new Date()): string {
+  return localDateString(timeZone, new Date(at.getTime() - days * 86_400_000));
+}
+
+/** 本地时区"今天零点"的小时桶键,即当天第一个桶 */
+export function localDayStartHour(timeZone: string, at: Date = new Date()): string {
+  return `${localDateString(timeZone, at)}T00`;
+}

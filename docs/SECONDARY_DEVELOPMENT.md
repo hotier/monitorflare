@@ -132,7 +132,7 @@ MonitorFlare/
 | 738–840 | 通知渠道 CRUD + 测试告警 |
 | 842–875 | API Keys |
 | 879–897 | 脱敏工具（`maskMonitorSensitive` 等） |
-| 899–1001 | `/api/v1` 开放 API 子应用（双前缀挂载） |
+| 899–1001 | `/v1` 开放 API 子应用（`/api/v1` 由入口重写等价可达） |
 | 1006–1051 | 备份 / 恢复 |
 | 1053–1121 | 状态页 JSON handler + 状态页登录 |
 | 1123–1229 | RSS feed / 订阅 / 退订 / webhook |
@@ -245,7 +245,7 @@ npm run dev --prefix frontend    # http://localhost:5173
 
 ## 4. 关键运行机制（改代码前必读）
 
-### 4.1 请求路径与"双前缀"约定
+### 4.1 请求路径与 `/api` 前缀剥离
 
 这是最容易踩坑的地方。链路如下：
 
@@ -256,37 +256,43 @@ npm run dev --prefix frontend    # http://localhost:5173
    └─ 生产: _worker.js   pathname.slice(4)    ⇒ Worker 收到 /monitors
 ```
 
-**因此：绝大多数路由在 Worker 侧注册的是"去掉 `/api` 之后"的路径**，例如：
+**因此：所有路由在 Worker 侧只注册"去掉 `/api` 之后"的路径**，例如：
 
 ```ts
 app.get('/monitors', ...)          // 对应前端 /api/monitors
 app.get('/monitors/public/details', ...)
-app.post('/settings', ...)  // 实为 app.put
+app.put('/settings', ...)
 ```
 
-但有**两类例外**，必须同时注册两个前缀：
+带 `/api` 前缀的请求由入口统一重写，**不需要（也不应该）注册第二遍**：
 
-1. **需要被直接访问的公开接口**（外部消费者可能绕过 Pages 直连 Worker）：
+```ts
+// worker/src/index.ts 末尾
+function stripApiPrefix(request: Request): Request {
+  const url = new URL(request.url);
+  if (!url.pathname.startsWith('/api/')) return request;
+  url.pathname = url.pathname.slice('/api'.length);
+  return new Request(url.toString(), request);   // method / headers / body 原样继承
+}
 
-```1101:1103:worker/src/index.ts
-// 双注册:直连 Worker(/api/status)与经 Pages 代理(/status)
-app.get('/api/status', statusHandler);
-app.get('/status', statusHandler);
+export default {
+  fetch: (request, env, ctx) => app.fetch(stripApiPrefix(request), env, ctx),
+  ...
+};
 ```
 
-同类还有 `/api/status/login`、`/api/subscribe`、`/api/unsubscribe`。
+> **必须在 `app.fetch` 之外重写**：Hono 在 dispatch 阶段就从 `request.url` 提取了 path，
+> 等到中间件里再改 `c.req.raw`，路由早就匹配完了。
 
-2. **`/api/v1` 开放 API 子应用**：
+历史上这里是"每个路由注册两遍"：`/api/status` + `/status`、`/api/v1` + `/v1`、
+`/api/subscribe` + `/subscribe`…… 端点数直接翻倍不说，改一个漏一个的风险很高。
+统一重写之后，`/api/xxx` 与 `/xxx` **可以混用且完全等价**。
 
-```999:1001:worker/src/index.ts
-// 双前缀挂载:直连 Worker(/api/v1)与经 Pages 代理(/v1)
-app.route('/api/v1', v1App);
-app.route('/v1', v1App);
-```
+**唯一的敏感点**：OAuth 回调构造的 `redirect_uri` 仍然写成 `/api/auth/oauth/callback/:provider`，
+因为它已经固化在 Google / GitHub 的应用配置里，改了会让所有现有部署的登录立刻失效。
+路由侧只注册裸路径 `/auth/oauth/callback/:provider`，靠入口重写接住带前缀的回调 —— 对外契约不动，内部只留一份。
 
-3. **特殊个例**：`/api/auth/oauth/callback/:provider`（`index.ts:194`）带 `/api` 前缀注册，因为 OAuth 服务商的重定向 URI 是固定的，不能依赖代理 rewrite。
-
-> **新增接口时**：默认只注册去前缀路径即可。如果该接口需要被外部系统直连调用，则再补一个 `/api/xxx` 别名。
+> **新增接口时**：只注册去前缀路径，没有例外。
 
 ### 4.2 鉴权模型
 
@@ -317,20 +323,29 @@ ensureInitialized()            幂等建表
 
 关键常量：
 
-```49:60:worker/src/index.ts
+```ts
+// 这里的路径都是剥掉 /api 前缀之后的形态(见文件末尾的 stripApiPrefix),
+// 所以 /api/status 与 /status 只需写一次裸路径。
 const PUBLIC_PATHS = [
-  '/auth/', '/monitors/public', '/api/status', '/feed.xml', '/api/subscribe', '/api/unsubscribe', '/webhooks/',
+  '/auth/', '/monitors/public', '/status', '/feed.xml', '/subscribe', '/unsubscribe', '/webhooks/',
 ];
-const PROTECTED_PREFIXES = ['/monitors', '/notification-channels', '/incidents', '/settings', '/test-alert', '/health', '/api-keys', '/backup', '/api/v1', '/v1'];
+const PROTECTED_PREFIXES = ['/monitors', '/notification-channels', '/alert-templates', '/incidents', '/settings', '/test-alert', '/health', '/api-keys', '/backup', '/v1'];
 
 // 私密模式下需锁定的公开接口(前缀匹配)
 const STATUS_LOCK_PATHS = [
-  '/monitors/public', '/incidents', '/settings', '/feed.xml', '/api/status', '/status',
-  '/api/subscribe', '/api/unsubscribe', '/subscribe', '/unsubscribe',
+  '/monitors/public', '/incidents', '/settings', '/feed.xml', '/status', '/subscribe', '/unsubscribe',
 ];
 ```
 
 > **注意**：`PUBLIC_PATHS` 与 `PROTECTED_PREFIXES` 存在重叠（如 `/monitors/public` 同时出现在两边），靠**先判断 PUBLIC 豁免**来保证公开接口不被拦截。修改这两个数组时要成对考虑。
+
+还有一处**不能只看路径**的判断：`GET /incidents` 默认返回进行中的公告（状态页公开读），
+`?status=all` 才是含已解决事件的管理口径。两个口径合并到同一个端点后，
+鉴权必须看查询参数，否则状态页匿名访问会拿到全量历史事件：
+
+```ts
+if (path === '/incidents' && c.req.method === 'GET' && c.req.query('status') !== 'all') return await next();
+```
 
 ### 4.3 状态页私密模式
 
@@ -611,11 +626,15 @@ export type ChannelType =
 
 在 `worker/src/index.ts` 对应分区追加，注意：
 
-1. **路径**：默认注册去 `/api` 前缀的路径（见 §4.1）。需要外部直连再加 `/api/xxx` 别名。
+1. **路径**：只注册去 `/api` 前缀的路径（见 §4.1）。`/api/xxx` 由入口重写，不要注册两遍。
 2. **鉴权**：新路径若需保护，要加进 `PROTECTED_PREFIXES`；若需公开，加进 `PUBLIC_PATHS`。
-3. **路由顺序**：Hono 按注册顺序匹配，**通配/参数路由必须放在具体路由之后**。例如 `/monitors/public/details`（272 行）必须在 `/monitors/public/:id`（346 行）之前，`/monitors/batch`（588 行）必须在 `/monitors/:id` 之前。
-4. **错误处理**：统一 `try/catch` + `c.json({ error: ... }, 500)`，参考现有写法。
-5. **前端调用**：用 `utils/api.js` 的 `fetchT`（自动超时 + 注入状态页 token）。
+   注意这两个数组里写的都是**裸路径**。
+3. **路由顺序**：Hono 按注册顺序匹配，**通配/参数路由必须放在具体路由之后**。例如 `/monitors/public/detail` 与 `/monitors/public/details` 都必须在 `/monitors/public/:id` 之前（否则 `detail` 会被当成 id 走 400），`POST /monitors/batch` 必须在 `POST /monitors/:id` 之前（否则批量操作会落进 action 分支返回 400）。
+4. **能合并就合并**：同一资源的多种口径优先用查询参数（`?status=`、`?include=`），
+   一次性的状态迁移优先用 `?action=`，导出/恢复这类反向操作优先用 method 区分。
+   每多一个端点就多一处鉴权判断、多一处文档、多一处前端同步更新。
+5. **错误处理**：统一 `try/catch` + `c.json({ error: ... }, 500)`，参考现有写法。
+6. **前端调用**：用 `utils/api.js` 的 `fetchT`（自动超时 + 注入状态页 token）。
    后台接口需要管理员令牌，目前**没有统一的 `authFetch` 工具**，各组件自己内联拼装，例如：
 
    ```js
@@ -832,32 +851,34 @@ worker/src/
 | POST | `/auth/magic-link` | 公开 |
 | GET | `/auth/magic-link/verify` | 公开 |
 | GET | `/auth/oauth/:provider` | 公开 |
-| GET | `/api/auth/oauth/callback/:provider` | 公开（注意带 `/api` 前缀） |
+| GET | `/api/auth/oauth/callback/:provider` | 公开（`redirect_uri` 带 `/api` 前缀，已固化在 OAuth 服务商配置里；路由注册的是裸路径，靠入口重写接住） |
 
 **监控**
 
 | 方法 | 路径 | 鉴权 |
 |---|---|---|
-| GET | `/monitors` | 需鉴权 |
-| GET | `/monitors/public` | 公开 |
-| GET | `/monitors/public/details` | 公开 |
-| GET | `/monitors/public/:id` | 公开 |
+| GET | `/monitors` | 需鉴权。可选 `?id=1` / `?ids=1,2,3` 过滤、`?include=logs,stats` 附带日志与可用率 |
+| GET | `/monitors/public` | 公开（可选 `?id=1` / `?ids=1,2,3` 服务端过滤，上限 50 个；`?detail=1` 附带可用率与延迟） |
+| GET | `/monitors/public/detail?id=1` | 公开（单个监控的完整详情：日志 + 延迟曲线 + 关联事件；支持 `?range=` / `?limit=`） |
+| GET | `/monitors/public/details` | 公开，已并入 `/monitors/public?detail=1`，保留给旧调用方 |
+| GET | `/monitors/public/:id` | 公开，已并入 `/monitors/public/detail?id=`，保留给旧调用方 |
 | POST | `/monitors` | 需鉴权 |
 | DELETE | `/monitors/:id` | 需鉴权 |
 | PATCH | `/monitors/:id/config` | 需鉴权 |
-| POST | `/monitors/:id/check` | 需鉴权 |
-| PATCH | `/monitors/:id/pause` | 需鉴权 |
-| GET | `/monitors/:id/logs` | 需鉴权 |
-| GET | `/monitors/:id/stats` | 需鉴权 |
+| POST | `/monitors/:id?action=check` | 需鉴权。立即探测一次 |
+| POST | `/monitors/:id?action=pause` | 需鉴权。暂停/恢复，body 可带 `{ paused: 0\|1 }`，不给则取反 |
 | POST | `/monitors/batch` | 需鉴权 |
 | PUT | `/monitors/reorder` | 需鉴权 |
+
+> `/monitors/:id/logs` 与 `/monitors/:id/stats` 已并入 `GET /monitors?include=logs,stats`，
+> 响应形如 `{ monitors: [...], logs: { "3": [...] }, stats: { "3": {...} } }`。
 
 **事件 / 设置 / 渠道 / 密钥**
 
 | 方法 | 路径 | 鉴权 |
 |---|---|---|
-| GET | `/incidents` | 公开（中间件特判） |
-| GET | `/incidents/all` | 需鉴权 |
+| GET | `/incidents` | 公开（中间件特判：默认只返回进行中的事件） |
+| GET | `/incidents?status=all` | 需鉴权（含已解决的历史事件） |
 | POST | `/incidents` | 需鉴权 |
 | PATCH | `/incidents/:id` | 需鉴权 |
 | DELETE | `/incidents/:id` | 需鉴权 |
@@ -868,13 +889,19 @@ worker/src/
 | POST | `/notification-channels` | 需鉴权 |
 | PATCH | `/notification-channels/:id` | 需鉴权 |
 | DELETE | `/notification-channels/:id` | 需鉴权 |
-| POST | `/notification-channels/:id/test` | 需鉴权 |
+| POST | `/notification-channels/:id?action=test` | 需鉴权。按该渠道绑定的模板版本发一条测试告警 |
 | POST | `/test-alert` | 需鉴权 |
+| GET | `/alert-templates` | 需鉴权 |
+| POST | `/alert-templates` | 需鉴权 |
+| PUT | `/alert-templates/:id` | 需鉴权 |
+| POST | `/alert-templates/:id?action=duplicate` | 需鉴权。复制一份出新版本 |
+| POST | `/alert-templates/:id?action=default` | 需鉴权。设为默认版本 |
+| DELETE | `/alert-templates/:id` | 需鉴权 |
 | GET | `/api-keys` | 需鉴权 |
 | POST | `/api-keys` | 需鉴权 |
 | DELETE | `/api-keys/:id` | 需鉴权 |
 
-**开放 API（`/api/v1` 与 `/v1` 双挂载）**
+**开放 API（挂载在 `/v1`，`/api/v1` 由入口重写等价可达）**
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
@@ -888,14 +915,16 @@ worker/src/
 
 | 方法 | 路径 | 鉴权 |
 |---|---|---|
-| GET | `/backup` | 需鉴权 |
-| POST | `/backup/restore` | 需鉴权 |
-| GET | `/api/status` + `/status` | 公开（私密模式下锁定） |
-| POST | `/api/status/login` + `/status/login` | 公开 |
+| GET | `/backup` | 需鉴权。导出整站快照 |
+| POST | `/backup` | 需鉴权。用快照覆盖整站（导出与恢复靠 method 区分） |
+| GET | `/status` | 公开（私密模式下锁定） |
+| POST | `/status/login` | 公开 |
 | GET | `/feed.xml` | 公开（私密模式下锁定） |
-| POST | `/api/subscribe` + `/subscribe` | 公开 |
-| POST | `/api/unsubscribe` + `/unsubscribe` | 公开 |
+| POST | `/subscribe` | 公开 |
+| POST | `/unsubscribe` | 公开 |
 | POST | `/webhooks/:token` | 公开 |
+
+> 上表所有路径都只注册裸路径；`/api/…` 由 `stripApiPrefix` 重写，两种写法等价。
 
 ### 8.4 扩展落点速查
 

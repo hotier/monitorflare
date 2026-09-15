@@ -227,11 +227,16 @@ export async function hashApiKey(key: string): Promise<string> {
 
 export async function verifyApiKey(env: Bindings, key: string): Promise<boolean> {
   const hash = await hashApiKey(key);
-  const row = await env.DB.prepare('SELECT id FROM api_keys WHERE key_hash = ?').bind(hash).first<{ id: number }>();
-  if (row) {
+  const row = await env.DB.prepare('SELECT id, last_used_at FROM api_keys WHERE key_hash = ?')
+    .bind(hash).first<{ id: number; last_used_at: string | null }>();
+  if (!row) return false;
+
+  // last_used_at 按小时节流回写:外部集成可能几秒调一次,每次都写一行纯属浪费写额度,
+  // 而这个字段只用于"最近活跃时间"展示,小时级精度足够。
+  const last = row.last_used_at ? new Date(row.last_used_at).getTime() : 0;
+  if (Date.now() - last > 3600_000) {
     await env.DB.prepare('UPDATE api_keys SET last_used_at = ? WHERE id = ?')
       .bind(new Date().toISOString(), row.id).run();
-    return true;
   }
-  return false;
+  return true;
 }

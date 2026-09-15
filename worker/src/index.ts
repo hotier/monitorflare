@@ -7,10 +7,11 @@ import type { Context } from 'hono';
 import { cors } from 'hono/cors';
 import type { Bindings, Incident, Monitor, NotificationChannel } from './types';
 import { updateDomainCertInfo, normalizeMonitorUrl } from './checks';
-import { sendToChannel, CHANNEL_TYPES, EMAIL_PROVIDERS } from './channels';
-import { buildAlertMessage, isSupportedLang } from './i18n';
+import { CHANNEL_TYPES, EMAIL_PROVIDERS } from './channels';
 import { ensureInitialized, getSetting, getTimezone, getSettingsMap, DEFAULT_SETTINGS } from './init';
-import { localDateString, tzModifier } from './datetime';
+import { localHourAgo, tzModifier } from './datetime';
+import { cached, invalidate, PUBLIC_CACHE, PRIVATE_CACHE } from './cache';
+import { buildMonitorStats } from './stats';
 import {
   createSessionToken, createOAuthState, verifyOAuthState, verifySessionToken,
   verifyAdminCredential, verifyMagicLinkToken, createMagicLinkToken,
@@ -19,18 +20,33 @@ import {
 } from './auth';
 import {
   getAllowedOrigins, isLocalOrigin, getAuthSecret, isValidEmail,
-  maskChannelConfig, formatTimeInTz, randomToken, safeEqual,
+  maskChannelConfig, randomToken, safeEqual,
 } from './utils';
 import { MONITOR_COLUMNS } from './sql';
 import { escapeXml, safeCompare, maskMonitorSensitive, isSensitiveSettingKey } from './utils/http';
 import { runScheduledTasks, performMonitorCheck } from './scheduler';
-import { sendAlertToAllChannels } from './services/alert';
+import { sendTestAlert } from './services/alert';
+import {
+  listTemplateVersions, createTemplateVersion, updateTemplateVersion, deleteTemplateVersion,
+  duplicateTemplateVersion, setDefaultVersion, normalizePayload,
+} from './services/template-store';
+import { parseTemplatePayload } from './services/template';
+import type { AlertTemplatePayload, AlertTemplateVersion } from './types';
 import { notifySubscribers, getEmailConfigForLogin, sendLoginEmail } from './services/email';
 
 // ============================================================
 // Hono 应用
 // ============================================================
 const app = new Hono<{ Bindings: Bindings }>();
+
+// ── 公开接口的缓存策略 ──
+// 30 秒:与前端轮询周期同量级,再长会让故障状态在状态页上迟到。
+const PUBLIC_TTL_MS = 30_000;
+
+/** 站点是否为公开模式。私密站点的响应不能进 CDN 等共享缓存 */
+async function isPublicSite(env: Bindings): Promise<boolean> {
+  return (await getSetting(env, 'status_page_visibility')) !== 'private';
+}
 
 // 全局错误处理：未捕获的异常统一转成 JSON 并写日志。
 // 没有它的话，运行时异常只会返回一个没有任何信息的 Cloudflare 1101 错误页。
@@ -51,18 +67,20 @@ app.use('/*', cors({
 }));
 
 // 鉴权中间件
+//
+// 这里的路径都是剥掉 /api 前缀之后的形态(见文件末尾的 stripApiPrefix),
+// 所以 /api/status 与 /status 只需写一次裸路径。
 const PUBLIC_PATHS = [
-  '/auth/', '/monitors/public', '/api/status', '/feed.xml', '/api/subscribe', '/api/unsubscribe', '/webhooks/',
+  '/auth/', '/monitors/public', '/status', '/feed.xml', '/subscribe', '/unsubscribe', '/webhooks/',
 ];
-const PROTECTED_PREFIXES = ['/monitors', '/notification-channels', '/incidents', '/settings', '/test-alert', '/health', '/api-keys', '/backup', '/api/v1', '/v1'];
+const PROTECTED_PREFIXES = ['/monitors', '/notification-channels', '/alert-templates', '/incidents', '/settings', '/test-alert', '/health', '/api-keys', '/backup', '/v1'];
 
 // 私密模式下需锁定的公开接口(前缀匹配)
 const STATUS_LOCK_PATHS = [
-  '/monitors/public', '/incidents', '/settings', '/feed.xml', '/api/status', '/status',
-  '/api/subscribe', '/api/unsubscribe', '/subscribe', '/unsubscribe',
+  '/monitors/public', '/incidents', '/settings', '/feed.xml', '/status', '/subscribe', '/unsubscribe',
 ];
 // 私密模式下始终放行(登录/管理认证)
-const STATUS_LOCK_EXEMPT = ['/status/login', '/api/status/login', '/auth/', '/webhooks/'];
+const STATUS_LOCK_EXEMPT = ['/status/login', '/auth/', '/webhooks/'];
 
 app.use('/*', async (c, next) => {
   if (c.req.method === 'OPTIONS') return await next();
@@ -95,9 +113,10 @@ app.use('/*', async (c, next) => {
 
   // 公开路由豁免
   if (PUBLIC_PATHS.some(p => path.startsWith(p))) return await next();
-  if (path === '/incidents' && c.req.method === 'GET') return await next();
+  // GET /incidents 默认口径是"进行中的事件",状态页直接读,免鉴权;
+  // ?status=all 是管理口径(含已解决的历史事件),不能靠路径判断了,必须往下走鉴权。
+  if (path === '/incidents' && c.req.method === 'GET' && c.req.query('status') !== 'all') return await next();
   if (path === '/settings' && c.req.method === 'GET') return await next();
-  if (path === '/monitors/public/details') return await next();
 
   const needsAuth = PROTECTED_PREFIXES.some(r => path.startsWith(r));
   if (!needsAuth) return await next();
@@ -202,7 +221,11 @@ app.get('/auth/oauth/:provider', async (c) => {
 });
 
 // OAuth 回调
-app.get('/api/auth/oauth/callback/:provider', async (c) => {
+//
+// 只注册裸路径,/api/auth/... 由 stripApiPrefix 重写过来。
+// 注意上面构造的 redirect_uri 仍然带 /api 前缀:它已经配在 Google / GitHub 的应用里,
+// 改了会让所有现有部署的登录立刻失败,所以对外契约不动,只在入口处做重写。
+app.get('/auth/oauth/callback/:provider', async (c) => {
   const provider = c.req.param('provider');
   const code = c.req.query('code') || '';
   const state = c.req.query('state') || '';
@@ -259,228 +282,271 @@ app.get('/api/auth/oauth/callback/:provider', async (c) => {
 // ============================================================
 // 监控 CRUD
 // ============================================================
+/**
+ * 管理端监控列表,同时是日志与统计的入口。
+ *
+ * 列表 / 日志 / 90 天可用率原本是三个端点(/monitors、/monitors/:id/logs、
+ * /monitors/:id/stats),口径不同但查的是同一批数据,合并后靠参数区分:
+ *   /monitors                                → { monitors: [...] }
+ *   /monitors?id=3                           → 只要这一个(可逗号分隔多个)
+ *   /monitors?id=3&include=logs&limit=50     → 多带一份 { logs: { 3: [...] } }
+ *   /monitors?include=stats                  → 多带一份 { stats: { id: {...} } }
+ */
 app.get('/monitors', async (c) => {
   try {
-    const { results } = await c.env.DB.prepare(`SELECT ${MONITOR_COLUMNS} FROM monitors ORDER BY sort_order ASC, created_at ASC`).all<Monitor>();
-    return c.json(results);
-  } catch (e: unknown) {
-    return c.json({ error: e instanceof Error ? e.message : 'Unknown error' }, 500);
-  }
-});
+    const ids = parseIdList(c.req.query('id'), c.req.query('ids'));
+    if (ids === 'invalid') return c.json({ error: 'Invalid monitor id' }, 400);
 
-app.get('/monitors/public', async (c) => {
-  try {
+    const include = (c.req.query('include') || '').split(',').map(s => s.trim()).filter(Boolean);
+    const unknown = include.filter(v => v !== 'logs' && v !== 'stats');
+    if (unknown.length > 0) return c.json({ error: `Unknown include: ${unknown.join(', ')}` }, 400);
+    const wantLogs = include.includes('logs');
+    const wantStats = include.includes('stats');
+    // limit/offset 只作用于日志。跨监控时它是整个结果集的分页,
+    // 不是"每个监控各取 N 条" —— 后者要么 N 次查询要么窗口函数,不值当。
+    const limit = Math.min(Math.max(Number(c.req.query('limit') || 50), 1), 500);
+    const offset = Math.max(Number(c.req.query('offset') || 0), 0);
+
+    const scope = ids || [];
+    const whereSql = scope.length > 0 ? `WHERE id IN (${scope.map(() => '?').join(',')})` : '';
     const { results } = await c.env.DB.prepare(
-      'SELECT id, name, url, type, status, last_check, cert_expiry, domain_expiry, paused, tags, check_ssl FROM monitors ORDER BY sort_order ASC, created_at ASC'
-    ).all();
-    return c.json(results);
-  } catch (e: unknown) {
-    return c.json({ error: e instanceof Error ? e.message : 'Unknown error' }, 500);
-  }
-});
+      `SELECT ${MONITOR_COLUMNS} FROM monitors ${whereSql} ORDER BY sort_order ASC, created_at ASC`
+    ).bind(...scope).all<Monitor>();
+    const monitors = results || [];
 
-// 公开详情:含延迟、可用率、90 天历史
-app.get('/monitors/public/details', async (c) => {
-  try {
-    const { results: monitors } = await c.env.DB.prepare(
-      'SELECT id, name, url, type, status, last_check, cert_expiry, domain_expiry, paused, tags, check_ssl, created_at FROM monitors ORDER BY sort_order ASC, created_at ASC'
-    ).all();
-    if (!monitors || monitors.length === 0) return c.json({ monitors: [] });
-
-    // 全站"按天"口径:跟随设置里的时区(默认 Asia/Shanghai),与每日聚合、前端日期轴一致
-    const tz = await getTimezone(c.env);
-    const tzMod = tzModifier(tz);
-
-    await c.env.DB.prepare(`CREATE TABLE IF NOT EXISTS daily_uptime (
-      monitor_id INTEGER NOT NULL, date TEXT NOT NULL,
-      total_checks INTEGER DEFAULT 0, successful_checks INTEGER DEFAULT 0,
-      avg_latency INTEGER DEFAULT 0, PRIMARY KEY (monitor_id, date)
-    )`).run();
-
-    const cnt = await c.env.DB.prepare('SELECT COUNT(*) as c FROM daily_uptime').first<{ c: number }>();
-    if (cnt && cnt.c === 0) {
-      await c.env.DB.prepare(`
-        INSERT OR IGNORE INTO daily_uptime (monitor_id, date, total_checks, successful_checks, avg_latency)
-        SELECT monitor_id, date(created_at, '${tzMod}'), COUNT(*), SUM(CASE WHEN is_fail=0 THEN 1 ELSE 0 END),
-               COALESCE(CAST(AVG(CASE WHEN is_fail=0 THEN latency END) AS INTEGER), 0)
-        FROM logs
-        WHERE date(created_at, '${tzMod}') >= date('now', '${tzMod}', '-90 days')
-          AND date(created_at, '${tzMod}') < date('now', '${tzMod}')
-        GROUP BY monitor_id, date(created_at, '${tzMod}')
-      `).run();
-    }
-
-    const { results: dailyRows } = await c.env.DB.prepare(
-      `SELECT monitor_id, date, total_checks, successful_checks FROM daily_uptime WHERE date >= date('now', '${tzMod}', '-90 days') ORDER BY monitor_id, date`
-    ).all();
-    const { results: liveRows } = await c.env.DB.prepare(`
-      SELECT monitor_id,
-        SUM(CASE WHEN created_at >= datetime('now','-24 hours') THEN 1 ELSE 0 END) as t24,
-        SUM(CASE WHEN created_at >= datetime('now','-24 hours') AND is_fail=0 THEN 1 ELSE 0 END) as s24,
-        SUM(CASE WHEN created_at >= datetime('now','-7 days') THEN 1 ELSE 0 END) as t7,
-        SUM(CASE WHEN created_at >= datetime('now','-7 days') AND is_fail=0 THEN 1 ELSE 0 END) as s7,
-        COUNT(*) as t30, SUM(CASE WHEN is_fail=0 THEN 1 ELSE 0 END) as s30
-      FROM logs WHERE created_at >= datetime('now','-30 days') GROUP BY monitor_id
-    `).all();
-    const { results: latRows } = await c.env.DB.prepare(
-      'SELECT monitor_id, latency FROM logs WHERE is_fail=0 ORDER BY created_at DESC LIMIT 200'
-    ).all();
-    // 当天数据在 daily_uptime 里要么缺失,要么只是聚合时刻的陈旧快照 → 从 logs 实时重算
-    const { results: todayRows } = await c.env.DB.prepare(`
-      SELECT monitor_id, COUNT(*) as t, SUM(CASE WHEN is_fail=0 THEN 1 ELSE 0 END) as s
-      FROM logs WHERE date(created_at, '${tzMod}') >= date('now', '${tzMod}') GROUP BY monitor_id
-    `).all();
-
-    type DS = { date: string; up: number; total: number };
-    const todayDate = localDateString(tz);
-    const dMap = new Map<number, DS[]>();
-    for (const r of dailyRows || []) {
-      if (r.date === todayDate) continue;
-      const id = r.monitor_id as number;
-      if (!dMap.has(id)) dMap.set(id, []);
-      dMap.get(id)!.push({ date: r.date as string, up: r.successful_checks as number, total: r.total_checks as number });
-    }
-    for (const r of todayRows || []) {
-      const total = Number(r.t) || 0;
-      if (total <= 0) continue;
-      const id = r.monitor_id as number;
-      if (!dMap.has(id)) dMap.set(id, []);
-      dMap.get(id)!.push({ date: todayDate, up: Number(r.s) || 0, total });
-    }
-    const sMap = new Map<number, Record<string, number>>();
-    for (const r of liveRows || []) sMap.set(r.monitor_id as number, r as Record<string, number>);
-    const lMap = new Map<number, number[]>();
-    for (const r of latRows || []) {
-      const id = r.monitor_id as number;
-      if (!lMap.has(id)) lMap.set(id, []);
-      const a = lMap.get(id)!;
-      if (a.length < 24) a.push(r.latency as number);
-    }
-    for (const [, a] of lMap) a.reverse();
-
-    const pct = (t?: number, s?: number) => t && t > 0 ? Number(((s! / t) * 100).toFixed(1)) : null;
-    const enriched = monitors.map(m => {
-      const id = m.id as number, s = sMap.get(id), lat = lMap.get(id) || [];
-      return { ...m, latency: lat.length > 0 ? lat[lat.length - 1] : null,
-        uptime_24h: pct(s?.t24, s?.s24), uptime_7d: pct(s?.t7, s?.s7), uptime_30d: pct(s?.t30, s?.s30),
-        daily_stats: dMap.get(id) || [], recent_latencies: lat };
-    });
-    return c.json({ monitors: enriched });
-  } catch (e: unknown) {
-    return c.json({ error: e instanceof Error ? e.message : 'Unknown error' }, 500);
-  }
-});
-
-// 单监控公开详情:基础信息 + uptime + 90 天历史 + 日志 + 事件
-// 支持 ?range=24h|7d|30d(延迟序列,默认 24h)与 ?limit=(日志条数,默认 50,上限 200)
-app.get('/monitors/public/:id', async (c) => {
-  try {
-    const id = Number(c.req.param('id'));
-    if (!Number.isInteger(id) || id <= 0) return c.json({ error: 'Invalid monitor id' }, 400);
-
-    const monitor = await c.env.DB.prepare(
-      'SELECT id, name, url, type, status, last_check, cert_expiry, domain_expiry, paused, tags, check_ssl, method, interval, keyword, created_at FROM monitors WHERE id = ?'
-    ).bind(id).first();
-    if (!monitor) return c.json({ error: 'Monitor not found' }, 404);
-
-    // 全站"按天"口径:跟随设置里的时区(默认 Asia/Shanghai),与每日聚合、前端日期轴一致
-    const tz = await getTimezone(c.env);
-    const tzMod = tzModifier(tz);
-
-    await c.env.DB.prepare(`CREATE TABLE IF NOT EXISTS daily_uptime (
-      monitor_id INTEGER NOT NULL, date TEXT NOT NULL,
-      total_checks INTEGER DEFAULT 0, successful_checks INTEGER DEFAULT 0,
-      avg_latency INTEGER DEFAULT 0, PRIMARY KEY (monitor_id, date)
-    )`).run();
-
-    const cnt = await c.env.DB.prepare('SELECT COUNT(*) as c FROM daily_uptime').first<{ c: number }>();
-    if (cnt && cnt.c === 0) {
-      await c.env.DB.prepare(`
-        INSERT OR IGNORE INTO daily_uptime (monitor_id, date, total_checks, successful_checks, avg_latency)
-        SELECT monitor_id, date(created_at, '${tzMod}'), COUNT(*), SUM(CASE WHEN is_fail=0 THEN 1 ELSE 0 END),
-               COALESCE(CAST(AVG(CASE WHEN is_fail=0 THEN latency END) AS INTEGER), 0)
-        FROM logs
-        WHERE date(created_at, '${tzMod}') >= date('now', '${tzMod}', '-90 days')
-          AND date(created_at, '${tzMod}') < date('now', '${tzMod}')
-        GROUP BY monitor_id, date(created_at, '${tzMod}')
-      `).run();
-    }
-
-    const { results: dailyRows } = await c.env.DB.prepare(
-      `SELECT date, total_checks, successful_checks FROM daily_uptime WHERE monitor_id = ? AND date >= date('now', '${tzMod}', '-90 days') ORDER BY date`
-    ).bind(id).all();
-
-    const upt = await c.env.DB.prepare(`
-      SELECT
-        SUM(CASE WHEN created_at >= datetime('now','-24 hours') THEN 1 ELSE 0 END) as t24,
-        SUM(CASE WHEN created_at >= datetime('now','-24 hours') AND is_fail=0 THEN 1 ELSE 0 END) as s24,
-        SUM(CASE WHEN created_at >= datetime('now','-7 days') THEN 1 ELSE 0 END) as t7,
-        SUM(CASE WHEN created_at >= datetime('now','-7 days') AND is_fail=0 THEN 1 ELSE 0 END) as s7,
-        SUM(CASE WHEN created_at >= datetime('now','-30 days') THEN 1 ELSE 0 END) as t30,
-        SUM(CASE WHEN created_at >= datetime('now','-30 days') AND is_fail=0 THEN 1 ELSE 0 END) as s30
-      FROM logs WHERE monitor_id = ? AND created_at >= datetime('now','-30 days')
-    `).bind(id).first();
-
-    const d90 = await c.env.DB.prepare(
-      `SELECT SUM(total_checks) as t, SUM(successful_checks) as s FROM daily_uptime WHERE monitor_id = ? AND date >= date('now', '${tzMod}', '-90 days') AND date < date('now', '${tzMod}')`
-    ).bind(id).first();
-    const today = await c.env.DB.prepare(
-      `SELECT COUNT(*) as t, SUM(CASE WHEN is_fail=0 THEN 1 ELSE 0 END) as s FROM logs WHERE monitor_id = ? AND date(created_at, '${tzMod}') >= date('now', '${tzMod}')`
-    ).bind(id).first();
-
-    const pct = (t?: number, s?: number) => t && t > 0 ? Number(((s! / t) * 100).toFixed(1)) : null;
-    const t90 = ((d90?.t as number) || 0) + ((today?.t as number) || 0);
-    const s90 = ((d90?.s as number) || 0) + ((today?.s as number) || 0);
-
-    const range = (c.req.query('range') || '24h');
-    const hours = range === '7d' ? 168 : range === '30d' ? 720 : 24;
-    const maxPts = range === '7d' ? 1000 : range === '30d' ? 1500 : 288;
-    const { results: rawSeries } = await c.env.DB.prepare(
-      'SELECT created_at, latency FROM logs WHERE monitor_id = ? AND is_fail = 0 AND created_at >= datetime(\'now\', ?) ORDER BY created_at ASC'
-    ).bind(id, `-${hours} hours`).all();
-    const step = rawSeries && rawSeries.length > maxPts ? Math.ceil(rawSeries.length / maxPts) : 1;
-    const latencySeries: { created_at: string; latency: number }[] = [];
-    if (rawSeries) {
-      for (let i = 0; i < rawSeries.length; i += step) {
-        latencySeries.push({ created_at: rawSeries[i].created_at as string, latency: rawSeries[i].latency as number });
+    type LogRow = { id: number; monitor_id: number; status_code: number | null; latency: number | null; is_fail: number; reason: string | null; created_at: string };
+    let logs: Record<number, LogRow[]> | undefined;
+    if (wantLogs) {
+      logs = {};
+      for (const m of monitors) logs[m.id] = [];
+      const inScope = monitors.map(m => m.id);
+      if (inScope.length > 0) {
+        const { results: rows } = await c.env.DB.prepare(
+          `SELECT id, monitor_id, status_code, latency, is_fail, reason, created_at FROM logs WHERE monitor_id IN (${inScope.map(() => '?').join(',')}) ORDER BY created_at DESC LIMIT ? OFFSET ?`
+        ).bind(...inScope, limit, offset).all<LogRow>();
+        for (const r of rows || []) logs[r.monitor_id]?.push(r);
       }
     }
 
-    const limit = Math.min(Math.max(Number(c.req.query('limit') || 50), 1), 200);
-    const { results: logs } = await c.env.DB.prepare(
-      'SELECT id, created_at, status_code, latency, is_fail, reason FROM logs WHERE monitor_id = ? ORDER BY created_at DESC LIMIT ?'
-    ).bind(id, limit).all();
+    let stats: Record<number, { uptime_24h: number | null; uptime_7d: number | null; uptime_30d: number | null; uptime_90d: number | null; avg_latency: number | null }> | undefined;
+    if (wantStats) {
+      const tz = await getTimezone(c.env);
+      const built = await buildMonitorStats(c.env, monitors.map(m => m.id), tz, 90);
+      stats = {};
+      for (const m of monitors) {
+        const s = built.get(m.id);
+        stats[m.id] = {
+          uptime_24h: s?.uptime_24h ?? null,
+          uptime_7d: s?.uptime_7d ?? null,
+          uptime_30d: s?.uptime_30d ?? null,
+          uptime_90d: s?.uptime_90d ?? null,
+          avg_latency: m.last_latency ?? null,
+        };
+      }
+    }
 
-    const { results: allIncidents } = await c.env.DB.prepare(
-      'SELECT * FROM incidents ORDER BY created_at DESC LIMIT 200'
-    ).all<Incident>();
-    const incidents = (allIncidents || []).filter(inc => {
-      if (!inc.affected_monitors) return false;
-      return inc.affected_monitors.split(',').map(x => x.trim()).filter(Boolean).includes(String(id));
-    });
-
-    // 当天数据在 daily_uptime 里要么缺失,要么只是聚合时刻的陈旧快照 → 从 logs 实时重算
-    const todayDate = localDateString(tz);
-    const todayTotal = (today?.t as number) || 0;
-    const dailyStats = (dailyRows || [])
-      .filter(r => r.date !== todayDate)
-      .map(r => ({ date: r.date as string, up: r.successful_checks as number, total: r.total_checks as number }));
-    if (todayTotal > 0) dailyStats.push({ date: todayDate, up: (today?.s as number) || 0, total: todayTotal });
-
-    const enriched = {
-      ...monitor,
-      latency: latencySeries.length > 0 ? latencySeries[latencySeries.length - 1].latency : null,
-      uptime_24h: pct(upt?.t24 as number, upt?.s24 as number),
-      uptime_7d: pct(upt?.t7 as number, upt?.s7 as number),
-      uptime_30d: pct(upt?.t30 as number, upt?.s30 as number),
-      uptime_90d: pct(t90, s90),
-      daily_stats: dailyStats,
-    };
-
-    return c.json({ monitor: enriched, logs: logs || [], latency_series: latencySeries, incidents });
+    return c.json({ monitors, ...(logs && { logs }), ...(stats && { stats }) });
   } catch (e: unknown) {
     return c.json({ error: e instanceof Error ? e.message : 'Unknown error' }, 500);
   }
+});
+
+/**
+ * 解析 ?id= 与 ?ids=(监控 id 过滤),/monitors 与 /monitors/public 共用。
+ *
+ * 两个参数等价且可同时出现(id 单个、ids 多个),解析后合并去重。
+ * 返回 null = 没传,不过滤(全量列表);数组 = 按这些 id 过滤;'invalid' = 参数不合法。
+ * 上限是为了不让 ?ids= 被当成"一次把整表拉出来"的放大器 —— 真要全量就别传参数。
+ */
+const MAX_ID_FILTER = 50;
+function parseIdList(id?: string, ids?: string): number[] | null | 'invalid' {
+  const raw = [id, ids].filter(v => v !== undefined && v !== '').join(',');
+  if (!raw.trim()) return null;
+  const parts = raw.split(',').map(s => s.trim()).filter(Boolean);
+  if (parts.length === 0) return null; // 只有分隔符,等同于没传
+  const out: number[] = [];
+  for (const p of parts) {
+    const n = Number(p);
+    if (!Number.isInteger(n) || n <= 0) return 'invalid';
+    if (!out.includes(n)) out.push(n);
+  }
+  return out.length > MAX_ID_FILTER ? 'invalid' : out;
+}
+
+// 公开列表的两套字段:简要(清单)与含统计(详情)。后者是前者的超集,
+// 差别只在 last_latency / created_at 两列,统计字段在 handlePublicList 里补。
+const PUBLIC_MONITOR_COLUMNS = 'id, name, url, type, status, last_check, cert_expiry, domain_expiry, paused, tags, check_ssl';
+const PUBLIC_DETAIL_COLUMNS = 'id, name, url, type, status, last_check, last_latency, cert_expiry, domain_expiry, paused, tags, check_ssl, created_at';
+
+/** ?detail= 的开关语义:给了非空且不是 0 / false 的值,就算"要统计字段" */
+function isDetailRequested(v?: string): boolean {
+  return !!v && v !== '0' && v.toLowerCase() !== 'false';
+}
+
+/**
+ * 公开列表(可选带统计字段),由 /monitors/public 与旧的 /monitors/public/details 共用。
+ *
+ * 这是全站最热的接口(状态页和管理页都每 30 秒轮询它),所以读路径上只允许出现
+ * "与监控数量成正比"的查询:monitors 一次 + 小时桶(每个监控 ≤25 行)+ 日聚合桶
+ * (90 行/监控,但按天缓存 10 分钟)。任何"扫 logs 原始表"的写法都会让这里的
+ * 读行数随历史数据量线性膨胀 —— 那正是原来几分钟烧完日额度的原因。
+ *
+ * detail 为假时返回数组(老调用方行为不变),为真时返回 { monitors: [...] }。
+ */
+async function handlePublicList(c: Context<{ Bindings: Bindings }>, detail: boolean) {
+  const ids = parseIdList(c.req.query('id'), c.req.query('ids'));
+  if (ids === 'invalid') return c.json({ error: 'Invalid monitor id' }, 400);
+
+  // placeholders 由数字个数生成,不含外部输入,拼接是安全的;值一律 bind 传入
+  const columns = detail ? PUBLIC_DETAIL_COLUMNS : PUBLIC_MONITOR_COLUMNS;
+  const query = () => ids
+    ? c.env.DB.prepare(
+      `SELECT ${columns} FROM monitors WHERE id IN (${ids.map(() => '?').join(',')}) ORDER BY sort_order ASC, created_at ASC`
+    ).bind(...ids).all()
+    : c.env.DB.prepare(
+      `SELECT ${columns} FROM monitors ORDER BY sort_order ASC, created_at ASC`
+    ).all();
+
+  try {
+    if (!detail) {
+      const { results } = await query();
+      return c.json(results);
+    }
+
+    // 缓存 key 必须带上 id 集合:否则 ?id=1 会命中全量那份缓存,返回不相干的数据
+    const payload = await cached(`publicDetails:${ids ? ids.join(',') : 'all'}`, PUBLIC_TTL_MS, async () => {
+      const { results: monitors } = await query();
+      if (!monitors || monitors.length === 0) return { monitors: [] };
+
+      // 全站"按天"口径:跟随设置里的时区(默认 Asia/Shanghai),与每日聚合、前端日期轴一致
+      const tz = await getTimezone(c.env);
+      const stats = await buildMonitorStats(c.env, monitors.map(m => m.id as number), tz, 90);
+
+      const enriched = monitors.map(m => {
+        const s = stats.get(m.id as number);
+        return {
+          ...m,
+          latency: (m.last_latency as number | null) ?? null,
+          uptime_24h: s?.uptime_24h ?? null,
+          uptime_7d: s?.uptime_7d ?? null,
+          uptime_30d: s?.uptime_30d ?? null,
+          // 列表也带上 90 天:详情页拿它做首屏预填,不用等详情请求回来才补上这一格
+          uptime_90d: s?.uptime_90d ?? null,
+          daily_stats: s?.daily_stats ?? [],
+          recent_latencies: s?.recent_latencies ?? [],
+        };
+      });
+      return { monitors: enriched };
+    });
+    // 私密站点不能进任何共享缓存;鉴权在中间件里做,内存缓存不会越权泄漏
+    c.header('Cache-Control', await isPublicSite(c.env) ? PUBLIC_CACHE : PRIVATE_CACHE);
+    return c.json(payload);
+  } catch (e: unknown) {
+    return c.json({ error: e instanceof Error ? e.message : 'Unknown error' }, 500);
+  }
+}
+
+// 公开监控清单:?id= / ?ids= 精确取某几个(不传即全量),?detail=1 额外给可用率与延迟。
+// 单监控的日志、延迟曲线、关联事件不在这里 —— 那些走 /monitors/public/detail?id=。
+app.get('/monitors/public', async (c) => handlePublicList(c, isDetailRequested(c.req.query('detail'))));
+
+// 旧路径,与 /monitors/public?detail=1 完全等价,保留给已发布的脚本和旧版前端
+app.get('/monitors/public/details', async (c) => handlePublicList(c, true));
+
+/**
+ * 单监控公开详情:基础信息 + uptime + 90 天历史 + 日志 + 延迟曲线 + 事件。
+ *
+ * 刻意与列表接口分开:这里返回的是单个监控的对象,日志(≤200 行)与延迟曲线
+ * (≤1500 点)只有在点开某一个监控时才用得上。塞进列表会让状态页首屏一次拉
+ * N 倍数据,缓存键也会变成 id 集合 × range × limit 的组合爆炸。
+ */
+async function handlePublicDetail(c: Context<{ Bindings: Bindings }>, id: number) {
+  try {
+    const range = c.req.query('range') || '24h';
+    const limit = Math.min(Math.max(Number(c.req.query('limit') || 50), 1), 200);
+
+    const payload = await cached(`publicDetail:${id}:${range}:${limit}`, PUBLIC_TTL_MS, async () => {
+      const monitor = await c.env.DB.prepare(
+        'SELECT id, name, url, type, status, last_check, last_latency, cert_expiry, domain_expiry, paused, tags, check_ssl, method, interval, keyword, created_at FROM monitors WHERE id = ?'
+      ).bind(id).first();
+      if (!monitor) return null;
+
+      // 全站"按天"口径:跟随设置里的时区(默认 Asia/Shanghai),与每日聚合、前端日期轴一致
+      const tz = await getTimezone(c.env);
+      const stats = (await buildMonitorStats(c.env, [id], tz, 90)).get(id);
+
+      const hours = range === '7d' ? 168 : range === '30d' ? 720 : 24;
+      const maxPts = range === '7d' ? 1000 : range === '30d' ? 1500 : 288;
+      let rawSeries: { created_at: string; latency: number }[];
+      if (range === '24h') {
+        // 单监控 24 小时只有几百行,直接读原始点,曲线保留真实密度
+        const { results } = await c.env.DB.prepare(
+          'SELECT created_at, latency FROM logs WHERE monitor_id = ? AND is_fail = 0 AND created_at >= datetime(\'now\', ?) ORDER BY created_at ASC'
+        ).bind(id, `-${hours} hours`).all();
+        rawSeries = (results || []).map(r => ({ created_at: r.created_at as string, latency: r.latency as number }));
+      } else {
+        // 7d/30d 读小时桶:168/720 行,而不是 2 千/8 千行原始点
+        const { results } = await c.env.DB.prepare(
+          'SELECT hour, total, fails, latency_sum FROM monitor_hourly WHERE monitor_id = ? AND hour >= ? ORDER BY hour ASC'
+        ).bind(id, localHourAgo(tz, hours)).all();
+        rawSeries = (results || [])
+          .filter(r => (Number(r.total) || 0) > (Number(r.fails) || 0))
+          .map(r => ({
+            created_at: `${String(r.hour).replace('T', ' ')}:00:00`,
+            latency: Math.round(Number(r.latency_sum) / (Number(r.total) - Number(r.fails))),
+          }));
+      }
+      const step = rawSeries.length > maxPts ? Math.ceil(rawSeries.length / maxPts) : 1;
+      const latencySeries: { created_at: string; latency: number }[] = [];
+      for (let i = 0; i < rawSeries.length; i += step) latencySeries.push(rawSeries[i]);
+
+      const { results: logs } = await c.env.DB.prepare(
+        'SELECT id, created_at, status_code, latency, is_fail, reason FROM logs WHERE monitor_id = ? ORDER BY created_at DESC LIMIT ?'
+      ).bind(id, limit).all();
+
+      const { results: allIncidents } = await c.env.DB.prepare(
+        'SELECT id, title, description, severity, status, type, scheduled_start, scheduled_end, affected_monitors, created_at, updated_at, resolved_at FROM incidents ORDER BY created_at DESC LIMIT 50'
+      ).all<Incident>();
+      const incidents = (allIncidents || []).filter(inc => {
+        if (!inc.affected_monitors) return false;
+        return inc.affected_monitors.split(',').map(x => x.trim()).filter(Boolean).includes(String(id));
+      });
+
+      const enriched = {
+        ...monitor,
+        latency: (monitor.last_latency as number | null) ?? null,
+        uptime_24h: stats?.uptime_24h ?? null,
+        uptime_7d: stats?.uptime_7d ?? null,
+        uptime_30d: stats?.uptime_30d ?? null,
+        uptime_90d: stats?.uptime_90d ?? null,
+        daily_stats: stats?.daily_stats ?? [],
+      };
+
+      return { monitor: enriched, logs: logs || [], latency_series: latencySeries, incidents };
+    });
+
+    if (!payload) return c.json({ error: 'Monitor not found' }, 404);
+    c.header('Cache-Control', await isPublicSite(c.env) ? PUBLIC_CACHE : PRIVATE_CACHE);
+    return c.json(payload);
+  } catch (e: unknown) {
+    return c.json({ error: e instanceof Error ? e.message : 'Unknown error' }, 500);
+  }
+}
+
+// 单监控详情用 ?id= 指定:与列表接口同一套取数方式,地址里不再出现占位符。
+// 必须注册在 /monitors/public/:id 之前,否则 "detail" 会被当成 id 走 400。
+app.get('/monitors/public/detail', async (c) => {
+  const ids = parseIdList(c.req.query('id'), c.req.query('ids'));
+  // 必须且只能给一个 id:这里返回的是单个监控的对象,多个 id 没有对应的形状
+  if (ids === 'invalid' || !ids || ids.length !== 1) return c.json({ error: 'Invalid monitor id' }, 400);
+  return handlePublicDetail(c, ids[0]);
+});
+
+// 旧路径,与 /monitors/public/detail?id= 完全等价,保留给已发布的脚本和旧版前端
+app.get('/monitors/public/:id', async (c) => {
+  const id = Number(c.req.param('id'));
+  if (!Number.isInteger(id) || id <= 0) return c.json({ error: 'Invalid monitor id' }, 400);
+  return handlePublicDetail(c, id);
 });
 
 app.post('/monitors', async (c) => {
@@ -515,15 +581,16 @@ app.post('/monitors', async (c) => {
     const alertErrorRate = Math.min(Math.max(Number(body.alert_error_rate) || 0, 0), 100);
     const legacy = body as Record<string, unknown>;
     const alertSilenceUptime = Math.min(Math.max(Number(body.alert_silence_uptime ?? legacy.alert_silence_hours) || 24, 1), 720);
+    const alertLatencyMs = Math.min(Math.max(Math.round(Number(body.alert_latency_ms) || 0), 0), 600000);
 
     const result = await c.env.DB.prepare(
-      `INSERT INTO monitors (name, url, type, config, method, interval, keyword, user_agent, tags, request_headers, request_body, alert_after_failures, check_ssl, check_domain, alert_error_rate, alert_silence_uptime)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO monitors (name, url, type, config, method, interval, keyword, user_agent, tags, request_headers, request_body, alert_after_failures, check_ssl, check_domain, alert_error_rate, alert_silence_uptime, alert_latency_ms)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).bind(
       name, url, type, config, method,
       intervalClamped, keyword || null, user_agent || null, tags || null,
       request_headers || null, request_body || null, alertAfterFailures,
-      checkSsl, checkDomain, alertErrorRate, alertSilenceUptime
+      checkSsl, checkDomain, alertErrorRate, alertSilenceUptime, alertLatencyMs
     ).run();
 
     const newId = result.meta.last_row_id as number;
@@ -552,6 +619,8 @@ app.post('/monitors', async (c) => {
       }
     })());
 
+    // 公开快照里要立刻多出这一条,否则访客最多要等一个 TTL 才看得到
+    invalidate('public');
     return c.json({ success: true, id: newId }, 201);
   } catch (e: unknown) {
     return c.json({ error: e instanceof Error ? e.message : 'Unknown error' }, 500);
@@ -561,8 +630,12 @@ app.post('/monitors', async (c) => {
 app.delete('/monitors/:id', async (c) => {
   const id = c.req.param('id');
   try {
+    // 级联删掉派生数据,否则孤儿行会一直占用日聚合/小时桶并污染备份
     await c.env.DB.prepare('DELETE FROM logs WHERE monitor_id = ?').bind(id).run();
+    await c.env.DB.prepare('DELETE FROM monitor_hourly WHERE monitor_id = ?').bind(id).run();
+    await c.env.DB.prepare('DELETE FROM daily_uptime WHERE monitor_id = ?').bind(id).run();
     await c.env.DB.prepare('DELETE FROM monitors WHERE id = ?').bind(id).run();
+    invalidate('public');
     return c.json({ success: true });
   } catch (e: unknown) {
     return c.json({ error: e instanceof Error ? e.message : 'Unknown error' }, 500);
@@ -583,6 +656,17 @@ app.patch('/monitors/:id/config', async (c) => {
       ['alert_silence_uptime', 'alert_silence_uptime'], ['alert_silence_ssl', 'alert_silence_ssl'],
       ['alert_silence_domain', 'alert_silence_domain'], ['alert_error_rate', 'alert_error_rate'],
       ['alert_after_failures', 'alert_after_failures'], ['paused', 'paused'],
+      ['alert_latency_ms', 'alert_latency_ms'],
+      // 告警判定口径的监控级覆盖:留空 = 跟随站点设置
+      ['alert_error_rate_window', 'alert_error_rate_window'],
+      ['alert_error_rate_min_samples', 'alert_error_rate_min_samples'],
+      ['alert_error_rate_silence', 'alert_error_rate_silence'],
+      ['alert_latency_silence', 'alert_latency_silence'],
+    ];
+    /** 这四项允许显式清空:传 null / '' / 0 表示"去掉覆盖,跟随全局规则" */
+    const CLEARABLE_NUMERIC: (keyof Monitor)[] = [
+      'alert_error_rate_window', 'alert_error_rate_min_samples',
+      'alert_error_rate_silence', 'alert_latency_silence',
     ];
     // 数值字段范围钳制,防止 0/负值造成轮询风暴等异常行为
     const NUMERIC_CLAMP: Partial<Record<keyof Monitor, [number, number]>> = {
@@ -592,11 +676,22 @@ app.patch('/monitors/:id/config', async (c) => {
       alert_silence_domain: [1, 720],
       alert_error_rate: [0, 100],
       alert_after_failures: [1, 100],
+      alert_latency_ms: [0, 600000],
+      alert_error_rate_window: [1, 1440],
+      alert_error_rate_min_samples: [1, 1000],
+      alert_error_rate_silence: [1, 10080],
+      alert_latency_silence: [1, 10080],
     };
     const VALID_METHODS = ['GET', 'POST', 'HEAD', 'PUT'];
     for (const [dbField, key] of simpleMap) {
       const v = body[key];
-      if (v === undefined || v === null) continue;
+      if (v === undefined) continue;
+      // 覆盖值清空要走到 UPDATE ... = NULL,所以必须排在"跳过 null"之前
+      if (CLEARABLE_NUMERIC.includes(key) && (v === null || v === '' || Number(v) <= 0)) {
+        fields.push(`${dbField} = NULL`);
+        continue;
+      }
+      if (v === null) continue;
       // name/url 不允许清空为空字符串
       if ((key === 'name' || key === 'url') && String(v).trim() === '') continue;
       let out: unknown = v;
@@ -622,78 +717,8 @@ app.patch('/monitors/:id/config', async (c) => {
     if (fields.length === 0) return c.json({ error: 'No valid fields' }, 400);
     values.push(id);
     await c.env.DB.prepare(`UPDATE monitors SET ${fields.join(', ')} WHERE id = ?`).bind(...values).run();
+    invalidate('public');
     return c.json({ success: true });
-  } catch (e: unknown) {
-    return c.json({ error: e instanceof Error ? e.message : 'Unknown error' }, 500);
-  }
-});
-
-app.post('/monitors/:id/check', async (c) => {
-  const id = c.req.param('id');
-  try {
-    const monitor = await c.env.DB.prepare(`SELECT ${MONITOR_COLUMNS} FROM monitors WHERE id = ?`)
-      .bind(id).first<Monitor>();
-    if (!monitor) return c.json({ error: 'Monitor not found' }, 404);
-    const result = await performMonitorCheck(monitor, c.env);
-    return c.json(result);
-  } catch (e: unknown) {
-    return c.json({ error: e instanceof Error ? e.message : 'Unknown error' }, 500);
-  }
-});
-
-app.patch('/monitors/:id/pause', async (c) => {
-  const id = c.req.param('id');
-  try {
-    // 优先使用 body.paused,未提供时按当前状态取反(toggle)
-    let paused: number | undefined;
-    try {
-      const body = await c.req.json<{ paused?: number }>();
-      paused = body?.paused;
-    } catch { /* no body */ }
-    const row = await c.env.DB.prepare('SELECT paused FROM monitors WHERE id = ?').bind(id).first<{ paused: number }>();
-    if (!row) return c.json({ error: 'Monitor not found' }, 404);
-    const next = paused !== undefined ? (paused ? 1 : 0) : (row.paused ? 0 : 1);
-    await c.env.DB.prepare('UPDATE monitors SET paused = ?, status = ?, retry_count = 0 WHERE id = ?')
-      .bind(next, next ? 'PAUSED' : 'UP', id).run();
-    return c.json({ success: true, paused: !!next });
-  } catch (e: unknown) {
-    return c.json({ error: e instanceof Error ? e.message : 'Unknown error' }, 500);
-  }
-});
-
-app.get('/monitors/:id/logs', async (c) => {
-  const id = c.req.param('id');
-  try {
-    const limit = Math.min(Math.max(Number(c.req.query('limit')) || 50, 1), 500);
-    const { results } = await c.env.DB.prepare(
-      'SELECT id, monitor_id, status_code, latency, is_fail, reason, created_at FROM logs WHERE monitor_id = ? ORDER BY created_at DESC LIMIT ?'
-    ).bind(id, limit).all();
-    return c.json(results);
-  } catch (e: unknown) {
-    return c.json({ error: e instanceof Error ? e.message : 'Unknown error' }, 500);
-  }
-});
-
-app.get('/monitors/:id/stats', async (c) => {
-  const id = c.req.param('id');
-  try {
-    const row = await c.env.DB.prepare(`
-      SELECT
-        SUM(CASE WHEN created_at >= datetime('now','-24 hours') THEN 1 ELSE 0 END) as t24,
-        SUM(CASE WHEN created_at >= datetime('now','-24 hours') AND is_fail=0 THEN 1 ELSE 0 END) as s24,
-        SUM(CASE WHEN created_at >= datetime('now','-7 days') THEN 1 ELSE 0 END) as t7,
-        SUM(CASE WHEN created_at >= datetime('now','-7 days') AND is_fail=0 THEN 1 ELSE 0 END) as s7,
-        COUNT(*) as t30, SUM(CASE WHEN is_fail=0 THEN 1 ELSE 0 END) as s30,
-        AVG(CASE WHEN is_fail=0 THEN latency END) as avg_latency
-      FROM logs WHERE monitor_id = ? AND created_at >= datetime('now','-30 days')
-    `).bind(id).first<{ t24: number; s24: number; t7: number; s7: number; t30: number; s30: number; avg_latency: number }>();
-    const pct = (t?: number, s?: number) => t && t > 0 ? Number(((s! / t) * 100).toFixed(1)) : null;
-    return c.json({
-      uptime_24h: pct(row?.t24, row?.s24),
-      uptime_7d: pct(row?.t7, row?.s7),
-      uptime_30d: pct(row?.t30, row?.s30),
-      avg_latency: row?.avg_latency ? Math.round(row.avg_latency) : null,
-    });
   } catch (e: unknown) {
     return c.json({ error: e instanceof Error ? e.message : 'Unknown error' }, 500);
   }
@@ -706,16 +731,23 @@ app.post('/monitors/batch', async (c) => {
     const placeholders = body.ids.map(() => '?').join(',');
     if (body.action === 'delete') {
       await c.env.DB.prepare(`DELETE FROM logs WHERE monitor_id IN (${placeholders})`).bind(...body.ids).run();
+      await c.env.DB.prepare(`DELETE FROM monitor_hourly WHERE monitor_id IN (${placeholders})`).bind(...body.ids).run();
+      await c.env.DB.prepare(`DELETE FROM daily_uptime WHERE monitor_id IN (${placeholders})`).bind(...body.ids).run();
       await c.env.DB.prepare(`DELETE FROM monitors WHERE id IN (${placeholders})`).bind(...body.ids).run();
+      invalidate('public');
     } else if (body.action === 'pause' || body.action === 'resume') {
       const paused = body.action === 'pause' ? 1 : 0;
       await c.env.DB.prepare(`UPDATE monitors SET paused = ?, status = ? WHERE id IN (${placeholders})`)
         .bind(paused, paused ? 'PAUSED' : 'UP', ...body.ids).run();
+      invalidate('public');
     } else if (body.action === 'check') {
       // 批量刷新: 对选中的监控并发执行一次真实检测
       const { results } = await c.env.DB.prepare(`SELECT ${MONITOR_COLUMNS} FROM monitors WHERE id IN (${placeholders})`)
         .bind(...body.ids).all<Monitor>();
       await Promise.all(results.map((monitor) => performMonitorCheck(monitor, c.env)));
+      // 手动检查的结果要立刻进公开快照:这个分支是提前 return 的,不走末尾的
+      // invalidate,漏掉的话状态页最多要再等一个 30s TTL 才看得到新延迟。
+      invalidate('public');
       return c.json({ success: true, affected: results.length });
     } else {
       return c.json({ error: 'Invalid action' }, 400);
@@ -732,7 +764,47 @@ app.put('/monitors/reorder', async (c) => {
     if (!Array.isArray(body.ids)) return c.json({ error: 'ids is required' }, 400);
     const stmt = c.env.DB.prepare('UPDATE monitors SET sort_order = ? WHERE id = ?');
     await c.env.DB.batch(body.ids.map((id, idx) => stmt.bind(idx, id)));
+    invalidate('public');
     return c.json({ success: true });
+  } catch (e: unknown) {
+    return c.json({ error: e instanceof Error ? e.message : 'Unknown error' }, 500);
+  }
+});
+
+/**
+ * 单个监控的手动动作。
+ *
+ * 手动探测与暂停原本各占一个端点(/monitors/:id/check、/monitors/:id/pause),
+ * 它们都不修改资源本身、只触发一次状态迁移,合并后靠 ?action= 区分:
+ *   POST /monitors/3?action=check   立即探测一次
+ *   POST /monitors/3?action=pause   暂停/恢复;body 可带 { paused: 0|1 },不给则按当前状态取反
+ */
+app.post('/monitors/:id', async (c) => {
+  const id = c.req.param('id');
+  const action = c.req.query('action') || '';
+  try {
+    if (action === 'check') {
+      const monitor = await c.env.DB.prepare(`SELECT ${MONITOR_COLUMNS} FROM monitors WHERE id = ?`)
+        .bind(id).first<Monitor>();
+      if (!monitor) return c.json({ error: 'Monitor not found' }, 404);
+      return c.json(await performMonitorCheck(monitor, c.env));
+    }
+    if (action === 'pause') {
+      // 优先使用 body.paused,未提供时按当前状态取反(toggle)
+      let paused: number | undefined;
+      try {
+        const body = await c.req.json<{ paused?: number }>();
+        paused = body?.paused;
+      } catch { /* no body */ }
+      const row = await c.env.DB.prepare('SELECT paused FROM monitors WHERE id = ?').bind(id).first<{ paused: number }>();
+      if (!row) return c.json({ error: 'Monitor not found' }, 404);
+      const next = paused !== undefined ? (paused ? 1 : 0) : (row.paused ? 0 : 1);
+      await c.env.DB.prepare('UPDATE monitors SET paused = ?, status = ?, retry_count = 0 WHERE id = ?')
+        .bind(next, next ? 'PAUSED' : 'UP', id).run();
+      invalidate('public');
+      return c.json({ success: true, paused: !!next });
+    }
+    return c.json({ error: 'Invalid action. Use ?action=check or ?action=pause' }, 400);
   } catch (e: unknown) {
     return c.json({ error: e instanceof Error ? e.message : 'Unknown error' }, 500);
   }
@@ -741,21 +813,29 @@ app.put('/monitors/reorder', async (c) => {
 // ============================================================
 // 事件公告
 // ============================================================
+/**
+ * 事件列表。
+ *
+ * 进行中的公告(状态页公开读)与全量事件(管理视角)原本是两个端点
+ * (/incidents、/incidents/all),同一张表的两种口径,合并后靠 ?status= 区分:
+ *   /incidents                → 只返回 status = 'active'
+ *   /incidents?status=all     → 全部,含已解决;鉴权在中间件里按这个参数放行
+ */
 app.get('/incidents', async (c) => {
   try {
+    const status = c.req.query('status') || 'active';
+    // 不认的值要报出来:否则 'all' 拼错成 'All' 时会被当成 active 静默返回半份数据
+    if (status !== 'active' && status !== 'all') return c.json({ error: "Invalid status. Use 'active' or 'all'" }, 400);
+    if (status === 'all') {
+      const limit = Math.min(Math.max(Number(c.req.query('limit') || 100), 1), 500);
+      const { results } = await c.env.DB.prepare(
+        'SELECT * FROM incidents ORDER BY created_at DESC LIMIT ?'
+      ).bind(limit).all<Incident>();
+      return c.json(results || []);
+    }
+    // 进行中的公告本来就不会多,这里不需要 limit —— 加了只会在异常时刻静默截断
     const { results } = await c.env.DB.prepare(
       "SELECT * FROM incidents WHERE status = 'active' ORDER BY created_at DESC"
-    ).all<Incident>();
-    return c.json(results || []);
-  } catch (e: unknown) {
-    return c.json({ error: e instanceof Error ? e.message : 'Unknown error' }, 500);
-  }
-});
-
-app.get('/incidents/all', async (c) => {
-  try {
-    const { results } = await c.env.DB.prepare(
-      'SELECT * FROM incidents ORDER BY created_at DESC LIMIT 100'
     ).all<Incident>();
     return c.json(results || []);
   } catch (e: unknown) {
@@ -780,6 +860,8 @@ app.post('/incidents', async (c) => {
     ).bind(body.title, body.description || null, severity, 'active', type, scheduledStart, scheduledEnd, body.affected_monitors || null, now, now).run();
     // 通知订阅者
     await notifySubscribers(c.env, body.title, body.description || '', 'incident');
+    // /api/status 的快照里带 active 事件,公告要立刻上状态页
+    invalidate('public');
     return c.json({ success: true, id: result.meta.last_row_id }, 201);
   } catch (e: unknown) {
     return c.json({ error: e instanceof Error ? e.message : 'Unknown error' }, 500);
@@ -804,6 +886,7 @@ app.patch('/incidents/:id', async (c) => {
     fields.push('updated_at = ?'); values.push(new Date().toISOString());
     values.push(id);
     await c.env.DB.prepare(`UPDATE incidents SET ${fields.join(', ')} WHERE id = ?`).bind(...values).run();
+    invalidate('public');
     return c.json({ success: true });
   } catch (e: unknown) {
     return c.json({ error: e instanceof Error ? e.message : 'Unknown error' }, 500);
@@ -814,6 +897,7 @@ app.delete('/incidents/:id', async (c) => {
   const id = c.req.param('id');
   try {
     await c.env.DB.prepare('DELETE FROM incidents WHERE id = ?').bind(id).run();
+    invalidate('public');
     return c.json({ success: true });
   } catch (e: unknown) {
     return c.json({ error: e instanceof Error ? e.message : 'Unknown error' }, 500);
@@ -841,6 +925,8 @@ app.put('/settings', async (c) => {
     const stmt = c.env.DB.prepare('INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at');
     const now = new Date().toISOString();
     await c.env.DB.batch(entries.map(([k, v]) => stmt.bind(k, String(v), now)));
+    // 时区/可见性等设置会影响公开快照的口径与缓存头,改完立即作废
+    invalidate('public');
     return c.json({ success: true });
   } catch (e: unknown) {
     return c.json({ error: e instanceof Error ? e.message : 'Unknown error' }, 500);
@@ -849,14 +935,16 @@ app.put('/settings', async (c) => {
 
 app.get('/health', async (c) => {
   try {
-    // 系统状态栏所需的全部指标:批量一次往返取完,避免多次查询往返
-    // MAX(created_at) 走 idx_logs_created、MAX(date) 走 daily_uptime 主键,均为索引直取
+    // 系统状态栏所需的全部指标:批量一次往返取完,避免多次查询往返。
+    // 日志量用 MAX(id) 近似而不是 COUNT(*):后者要扫完整张 logs(几十万行),
+    // 而管理页每 60 秒就打一次这个接口。MAX(id) 走主键,O(1)。
+    // 最后一条日志同理取 id 最大的那行,不再依赖已删除的 created_at 全局索引。
     const [probe, logs, channels, daily, lastLog] = await c.env.DB.batch([
       c.env.DB.prepare('SELECT 1 as ok'),
-      c.env.DB.prepare('SELECT COUNT(*) as c FROM logs'),
+      c.env.DB.prepare('SELECT MAX(id) as c FROM logs'),
       c.env.DB.prepare('SELECT COUNT(*) as c FROM notification_channels WHERE enabled = 1'),
       c.env.DB.prepare('SELECT MAX(date) as d FROM daily_uptime'),
-      c.env.DB.prepare('SELECT MAX(created_at) as t FROM logs'),
+      c.env.DB.prepare('SELECT created_at as t FROM logs ORDER BY id DESC LIMIT 1'),
     ]);
     const logsRow = logs.results?.[0] as { c: number } | undefined;
     const channelsRow = channels.results?.[0] as { c: number } | undefined;
@@ -892,7 +980,7 @@ app.get('/notification-channels', async (c) => {
 
 app.post('/notification-channels', async (c) => {
   try {
-    const body = await c.req.json<{ type: string; name: string; config: Record<string, unknown>; enabled?: number }>();
+    const body = await c.req.json<{ type: string; name: string; config: Record<string, unknown>; enabled?: number; template_version_id?: number | null }>();
     if (!body.type || !body.name || !body.config) return c.json({ error: 'Missing required fields' }, 400);
     if (!(CHANNEL_TYPES as readonly string[]).includes(body.type)) {
       return c.json({ error: `Invalid type. Valid: ${CHANNEL_TYPES.join(', ')}` }, 400);
@@ -904,8 +992,15 @@ app.post('/notification-channels', async (c) => {
         return c.json({ error: `Invalid email provider. Valid: ${EMAIL_PROVIDERS.join(', ')}` }, 400);
       }
     }
-    await c.env.DB.prepare('INSERT INTO notification_channels (type, name, enabled, config) VALUES (?, ?, ?, ?)')
-      .bind(body.type, body.name, body.enabled ?? 1, JSON.stringify(body.config)).run();
+    // 允许建渠道时就指定模板版本;非法 id 忽略(指向不存在的版本没有意义)
+    const rawVersion = Number(body.template_version_id) || 0;
+    let boundVersion: number | null = null;
+    if (rawVersion > 0) {
+      const exists = await c.env.DB.prepare('SELECT id FROM alert_templates WHERE id = ?').bind(rawVersion).first<{ id: number }>();
+      if (exists) boundVersion = rawVersion;
+    }
+    await c.env.DB.prepare('INSERT INTO notification_channels (type, name, enabled, config, template_version_id) VALUES (?, ?, ?, ?, ?)')
+      .bind(body.type, body.name, body.enabled ?? 1, JSON.stringify(body.config), boundVersion).run();
     return c.json({ success: true });
   } catch (e: unknown) {
     return c.json({ error: e instanceof Error ? e.message : 'Unknown error' }, 500);
@@ -915,11 +1010,21 @@ app.post('/notification-channels', async (c) => {
 app.patch('/notification-channels/:id', async (c) => {
   const id = c.req.param('id');
   try {
-    const body = await c.req.json<{ name?: string; enabled?: number; config?: Record<string, unknown> }>();
+    const body = await c.req.json<{ name?: string; enabled?: number; config?: Record<string, unknown>; template_version_id?: number | null }>();
     const fields: string[] = [];
     const values: unknown[] = [];
     if (body.name !== undefined) { fields.push('name = ?'); values.push(body.name); }
     if (body.enabled !== undefined) { fields.push('enabled = ?'); values.push(body.enabled); }
+    // 0 或 null 表示"跟随默认版本";非法 id 直接忽略,免得渠道指向一个不存在的版本
+    if (body.template_version_id !== undefined) {
+      const raw = Number(body.template_version_id);
+      if (raw > 0) {
+        const exists = await c.env.DB.prepare('SELECT id FROM alert_templates WHERE id = ?').bind(raw).first<{ id: number }>();
+        if (exists) { fields.push('template_version_id = ?'); values.push(raw); }
+      } else {
+        fields.push('template_version_id = NULL');
+      }
+    }
     if (body.config !== undefined && Object.keys(body.config).length > 0) {
       const existing = await c.env.DB.prepare('SELECT config FROM notification_channels WHERE id = ?')
         .bind(id).first<{ config: string }>();
@@ -949,18 +1054,19 @@ app.delete('/notification-channels/:id', async (c) => {
   }
 });
 
-app.post('/notification-channels/:id/test', async (c) => {
+/**
+ * 单个渠道的手动动作。
+ *
+ * 原 /notification-channels/:id/test:发一条测试告警,验证"这个渠道会收到什么"
+ * (按它绑定的模板版本渲染)。合并进子资源路径后靠 ?action= 区分。
+ */
+app.post('/notification-channels/:id', async (c) => {
   const id = c.req.param('id');
   try {
+    if (c.req.query('action') !== 'test') return c.json({ error: "Invalid action. Use ?action=test" }, 400);
     const channel = await c.env.DB.prepare('SELECT * FROM notification_channels WHERE id = ?').bind(id).first<NotificationChannel>();
     if (!channel) return c.json({ error: 'Channel not found' }, 404);
-    const lang = isSupportedLang(await getSetting(c.env, 'language'));
-    const tz = await getSetting(c.env, 'timezone') || 'Asia/Shanghai';
-    const msg = buildAlertMessage(
-      { name: 'Test Monitor', url: 'https://example.com' }, 'DOWN',
-      'This is a test message to verify your notification channel.', formatTimeInTz(new Date(), tz), lang,
-    );
-    const sent = await sendToChannel(channel, msg, c.env);
+    const sent = await sendTestAlert(c.env, [channel]);
     return c.json({ success: sent });
   } catch (e: unknown) {
     return c.json({ error: e instanceof Error ? e.message : 'Unknown error' }, 500);
@@ -969,14 +1075,104 @@ app.post('/notification-channels/:id/test', async (c) => {
 
 app.post('/test-alert', async (c) => {
   try {
-    const lang = isSupportedLang(await getSetting(c.env, 'language'));
-    const tz = await getSetting(c.env, 'timezone') || 'Asia/Shanghai';
-    const msg = buildAlertMessage(
-      { name: 'Test Monitor', url: 'https://example.com' }, 'DOWN',
-      'This is a test message to verify your notification channels.', formatTimeInTz(new Date(), tz), lang,
-    );
-    const sent = await sendAlertToAllChannels(c.env, msg);
-    return c.json({ success: sent });
+    return c.json({ success: await sendTestAlert(c.env) });
+  } catch (e: unknown) {
+    return c.json({ error: e instanceof Error ? e.message : 'Unknown error' }, 500);
+  }
+});
+
+// ============================================================
+// 告警模板版本
+//
+// 一份版本 = 一整套告警文案(6 类模板 + 标题 + 落款)。
+// 渠道可以各自绑定一个版本,于是同一条告警能给不同渠道发不同措辞。
+// ============================================================
+app.get('/alert-templates', async (c) => {
+  try {
+    const [versions, channelRes] = await Promise.all([
+      listTemplateVersions(c.env),
+      c.env.DB.prepare('SELECT id, name, type, enabled, template_version_id FROM notification_channels ORDER BY created_at DESC')
+        .all<{ id: number; name: string; type: string; enabled: number; template_version_id: number | null }>(),
+    ]);
+    return c.json({
+      versions: versions.map(v => ({
+        id: v.id, name: v.name, note: v.note, is_default: Number(v.is_default) === 1,
+        created_at: v.created_at, updated_at: v.updated_at,
+        payload: normalizePayload(parseTemplatePayload(v.payload)),
+      })),
+      channels: channelRes.results || [],
+    });
+  } catch (e: unknown) {
+    return c.json({ error: e instanceof Error ? e.message : 'Unknown error' }, 500);
+  }
+});
+
+app.post('/alert-templates', async (c) => {
+  try {
+    const body = await c.req.json<{ name?: string; note?: string; payload?: Partial<AlertTemplatePayload>; is_default?: boolean }>();
+    const id = await createTemplateVersion(c.env, {
+      name: body.name || '', note: body.note ?? null,
+      payload: body.payload || {}, isDefault: body.is_default === true,
+    });
+    return c.json({ success: true, id });
+  } catch (e: unknown) {
+    return c.json({ error: e instanceof Error ? e.message : 'Unknown error' }, 500);
+  }
+});
+
+app.put('/alert-templates/:id', async (c) => {
+  const id = Number(c.req.param('id'));
+  try {
+    const body = await c.req.json<{ name?: string; note?: string; payload?: Partial<AlertTemplatePayload>; is_default?: boolean }>();
+    const exists = await c.env.DB.prepare('SELECT id FROM alert_templates WHERE id = ?').bind(id).first<AlertTemplateVersion>();
+    if (!exists) return c.json({ error: 'Template version not found' }, 404);
+    await updateTemplateVersion(c.env, id, {
+      name: body.name || '', note: body.note ?? null,
+      payload: body.payload || {}, isDefault: body.is_default === true,
+    });
+    return c.json({ success: true });
+  } catch (e: unknown) {
+    return c.json({ error: e instanceof Error ? e.message : 'Unknown error' }, 500);
+  }
+});
+
+/**
+ * 单个模板版本的手动动作。
+ *
+ * 原 /alert-templates/:id/duplicate 与 /:id/default。两者都不改内容、
+ * 只改变版本集合(多一份副本 / 换默认指向),合并后靠 ?action= 区分:
+ *   ?action=duplicate   复制一份出新版本(改文案前先留个底,也方便做 A/B 措辞)
+ *   ?action=default     设为默认版本
+ */
+app.post('/alert-templates/:id', async (c) => {
+  const id = Number(c.req.param('id'));
+  const action = c.req.query('action') || '';
+  try {
+    if (action === 'duplicate') {
+      const newId = await duplicateTemplateVersion(c.env, id);
+      if (!newId) return c.json({ error: 'Template version not found' }, 404);
+      return c.json({ success: true, id: newId });
+    }
+    if (action === 'default') {
+      await setDefaultVersion(c.env, id);
+      return c.json({ success: true });
+    }
+    return c.json({ error: 'Invalid action. Use ?action=duplicate or ?action=default' }, 400);
+  } catch (e: unknown) {
+    return c.json({ error: e instanceof Error ? e.message : 'Unknown error' }, 500);
+  }
+});
+
+app.delete('/alert-templates/:id', async (c) => {
+  const id = Number(c.req.param('id'));
+  try {
+    // 默认版本是所有未绑定渠道的兜底文案,删掉它等于让一部分告警没东西可发 —— 直接挡掉
+    const target = await c.env.DB.prepare('SELECT is_default FROM alert_templates WHERE id = ?').bind(id).first<{ is_default: number }>();
+    if (target && Number(target.is_default) === 1) return c.json({ error: 'cannot_delete_default' }, 400);
+    const cnt = await c.env.DB.prepare('SELECT COUNT(*) as c FROM alert_templates').first<{ c: number }>();
+    if (cnt && Number(cnt.c) <= 1) return c.json({ error: 'At least one template version is required' }, 400);
+    await deleteTemplateVersion(c.env, id);
+    return c.json({ success: true });
   } catch (e: unknown) {
     return c.json({ error: e instanceof Error ? e.message : 'Unknown error' }, 500);
   }
@@ -1018,10 +1214,10 @@ app.delete('/api-keys/:id', async (c) => {
 });
 
 // ============================================================
-// 完整数据 API(/api/v1,需 API key 或 admin token)
+// 完整数据 API(/v1,需 API key 或 admin token)
 // ============================================================
 
-// /api/v1 子应用(同时挂载到 /api/v1 与 /v1,兼容 Pages 代理路径)
+// /v1 子应用。/api/v1 由 stripApiPrefix 重写过来,挂一次即可
 const v1App = new Hono<{ Bindings: Bindings }>();
 
 v1App.get('/monitors', async (c) => {
@@ -1047,11 +1243,17 @@ v1App.get('/logs', async (c) => {
     if (since) { where.push('created_at >= ?'); bind.push(since); }
     if (until) { where.push('created_at <= ?'); bind.push(until); }
     const whereSql = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
+    // logs 上只剩 (monitor_id, created_at) 一个索引:带 monitor_id 时按 created_at 排序能
+    // 走索引;不带时按 created_at 排要整表排序,而 id 与 created_at 同序,换成 id 走主键。
+    const orderCol = monitorId > 0 ? 'created_at' : 'id';
 
     const { results } = await c.env.DB.prepare(
-      `SELECT id, monitor_id, status_code, latency, is_fail, reason, created_at FROM logs ${whereSql} ORDER BY created_at DESC LIMIT ? OFFSET ?`
+      `SELECT id, monitor_id, status_code, latency, is_fail, reason, created_at FROM logs ${whereSql} ORDER BY ${orderCol} DESC LIMIT ? OFFSET ?`
     ).bind(...bind, limit, offset).all();
-    const cnt = await c.env.DB.prepare(`SELECT COUNT(*) as c FROM logs ${whereSql}`).bind(...bind).first<{ c: number }>();
+    // 同理:无条件 COUNT(*) 是整表扫,用 MAX(id) 近似(用于分页总数,精度足够)
+    const cnt = await c.env.DB.prepare(
+      where.length > 0 ? `SELECT COUNT(*) as c FROM logs ${whereSql}` : 'SELECT MAX(id) as c FROM logs'
+    ).bind(...bind).first<{ c: number }>();
     return c.json({ total: cnt?.c || 0, limit, offset, logs: results || [] });
   } catch (e: unknown) {
     return c.json({ error: e instanceof Error ? e.message : 'Unknown error' }, 500);
@@ -1103,7 +1305,8 @@ v1App.get('/export', async (c) => {
   try {
     const limit = Math.min(Math.max(Number(c.req.query('limit') || 1000), 1), 5000);
     const { results: monitors } = await c.env.DB.prepare(`SELECT ${MONITOR_COLUMNS} FROM monitors ORDER BY sort_order ASC`).all();
-    const { results: logs } = await c.env.DB.prepare('SELECT id, monitor_id, status_code, latency, is_fail, reason, created_at FROM logs ORDER BY created_at DESC LIMIT ?').bind(limit).all();
+    // 这里按 id 而不是 created_at 排:后者没有索引可用,等于整表排序;id 与 created_at 同序
+    const { results: logs } = await c.env.DB.prepare('SELECT id, monitor_id, status_code, latency, is_fail, reason, created_at FROM logs ORDER BY id DESC LIMIT ?').bind(limit).all();
     const { results: incidents } = await c.env.DB.prepare('SELECT * FROM incidents ORDER BY created_at DESC LIMIT 1000').all();
     const tzMod = tzModifier(await getTimezone(c.env));
     const { results: uptime } = await c.env.DB.prepare(`SELECT monitor_id, date, total_checks, successful_checks, avg_latency FROM daily_uptime WHERE date >= date('now', '${tzMod}', '-90 days') ORDER BY monitor_id, date`).all();
@@ -1124,16 +1327,18 @@ v1App.get('/export', async (c) => {
   }
 });
 
-// 双前缀挂载:直连 Worker(/api/v1)与经 Pages 代理(/v1)
-app.route('/api/v1', v1App);
 app.route('/v1', v1App);
 
 // ============================================================
 // 备份 / 恢复
+//
+// 同一个资源、两个方向:GET 导出整站快照,POST 用快照覆盖整站。
+// 原来是 /backup 与 /backup/restore 两个路径,合并后用 method 区分。
 // ============================================================
 app.get('/backup', async (c) => {
   try {
-    const tables = ['monitors', 'logs', 'incidents', 'settings', 'notification_channels', 'subscriptions'];
+    // alert_templates 也要带走:它是告警文案的唯一存储,丢了只剩内置兜底文案
+    const tables = ['monitors', 'logs', 'incidents', 'settings', 'notification_channels', 'alert_templates', 'subscriptions'];
     const dump: Record<string, unknown[]> = {};
     for (const t of tables) {
       const { results } = await c.env.DB.prepare(`SELECT * FROM ${t}`).all();
@@ -1146,7 +1351,7 @@ app.get('/backup', async (c) => {
   }
 });
 
-app.post('/backup/restore', async (c) => {
+app.post('/backup', async (c) => {
   try {
     const body = await c.req.json<{ data?: Record<string, unknown[]> }>();
     const data = body?.data;
@@ -1175,59 +1380,49 @@ app.post('/backup/restore', async (c) => {
 
 // ============================================================
 // 公开 API + RSS + 订阅
-// 注意:经 Pages _worker.js 代理后 /api 前缀会被剥掉,
-// 因此公开路由同时注册带 /api 前缀(直连 Worker)和不带前缀(经 Pages 访问)两个版本。
+//
+// 经 Pages _worker.js 代理后 /api 前缀会被剥掉,所以每个公开路由过去都要注册
+// "带 /api" 和 "不带前缀" 两个版本。现在由入口处的 stripApiPrefix 统一重写,
+// 这里只注册裸路径 —— 端点数减半,也不会再出现"改了一个忘了另一个"。
 // ============================================================
 const statusHandler = async (c) => {
   try {
-    const { results: monitors } = await c.env.DB.prepare(
-      'SELECT id, name, url, type, status, last_check, paused, tags FROM monitors ORDER BY sort_order ASC'
-    ).all();
-    const ids = (monitors || []).map(m => m.id as number);
-    const statsMap: Record<number, { uptime_7d: number | null; uptime_30d: number | null; latency: number | null }> = {};
-    if (ids.length > 0) {
-      const placeholders = ids.map(() => '?').join(',');
-      const { results: stats } = await c.env.DB.prepare(`
-        SELECT monitor_id,
-          SUM(CASE WHEN created_at >= datetime('now','-7 days') THEN 1 ELSE 0 END) as t7,
-          SUM(CASE WHEN created_at >= datetime('now','-7 days') AND is_fail=0 THEN 1 ELSE 0 END) as s7,
-          COUNT(*) as t30, SUM(CASE WHEN is_fail=0 THEN 1 ELSE 0 END) as s30
-        FROM logs WHERE monitor_id IN (${placeholders}) AND created_at >= datetime('now','-30 days') GROUP BY monitor_id
-      `).bind(...ids).all();
-      const { results: latRows } = await c.env.DB.prepare(
-        `SELECT monitor_id, latency FROM logs WHERE is_fail=0 AND monitor_id IN (${placeholders}) ORDER BY created_at DESC LIMIT ${ids.length * 5}`
-      ).bind(...ids).all();
-      const latMap = new Map<number, number[]>();
-      for (const r of latRows || []) {
-        const id = r.monitor_id as number;
-        if (!latMap.has(id)) latMap.set(id, []);
-        if (latMap.get(id)!.length < 3) latMap.get(id)!.push(r.latency as number);
+    const payload = await cached('publicStatus', PUBLIC_TTL_MS, async () => {
+      const { results: monitors } = await c.env.DB.prepare(
+        'SELECT id, name, url, type, status, last_check, last_latency, paused, tags FROM monitors ORDER BY sort_order ASC'
+      ).all();
+      const ids = (monitors || []).map(m => m.id as number);
+      const statsMap: Record<number, { uptime_7d: number | null; uptime_30d: number | null; latency: number | null }> = {};
+      if (ids.length > 0) {
+        const tz = await getTimezone(c.env);
+        const stats = await buildMonitorStats(c.env, ids, tz, 30);
+        for (const id of ids) {
+          const s = stats.get(id);
+          const m = (monitors || []).find(x => x.id === id);
+          statsMap[id] = {
+            uptime_7d: s?.uptime_7d ?? null,
+            uptime_30d: s?.uptime_30d ?? null,
+            latency: (m?.last_latency as number | null) ?? null,
+          };
+        }
       }
-      for (const s of stats || []) {
-        const t7 = s.t7 as number, s7 = s.s7 as number, t30 = s.t30 as number, s30 = s.s30 as number;
-        statsMap[s.monitor_id as number] = {
-          uptime_7d: t7 > 0 ? Number(((s7 / t7) * 100).toFixed(1)) : null,
-          uptime_30d: t30 > 0 ? Number(((s30 / t30) * 100).toFixed(1)) : null,
-          latency: latMap.get(s.monitor_id as number)?.[0] ?? null,
-        };
-      }
-    }
-    const { results: incidents } = await c.env.DB.prepare(
-      "SELECT id, title, severity, status, type, created_at, resolved_at FROM incidents WHERE status = 'active' ORDER BY created_at DESC"
-    ).all();
-    const out = (monitors || []).map(m => ({
-      id: m.id, name: m.name, url: m.url, type: m.type, status: m.status,
-      paused: m.paused, tags: m.tags, last_check: m.last_check,
-      ...(statsMap[m.id as number] || { uptime_7d: null, uptime_30d: null, latency: null }),
-    }));
-    return c.json({ generated_at: new Date().toISOString(), monitors: out, incidents: incidents || [] });
+      const { results: incidents } = await c.env.DB.prepare(
+        "SELECT id, title, severity, status, type, created_at, resolved_at FROM incidents WHERE status = 'active' ORDER BY created_at DESC"
+      ).all();
+      const out = (monitors || []).map(m => ({
+        id: m.id, name: m.name, url: m.url, type: m.type, status: m.status,
+        paused: m.paused, tags: m.tags, last_check: m.last_check,
+        ...(statsMap[m.id as number] || { uptime_7d: null, uptime_30d: null, latency: null }),
+      }));
+      return { generated_at: new Date().toISOString(), monitors: out, incidents: incidents || [] };
+    });
+    c.header('Cache-Control', await isPublicSite(c.env) ? PUBLIC_CACHE : PRIVATE_CACHE);
+    return c.json(payload);
   } catch (e: unknown) {
     return c.json({ error: e instanceof Error ? e.message : 'Unknown error' }, 500);
   }
 };
 
-// 双注册:直连 Worker(/api/status)与经 Pages 代理(/status)
-app.get('/api/status', statusHandler);
 app.get('/status', statusHandler);
 
 // 状态页登录(私密模式):密码换 token
@@ -1245,7 +1440,6 @@ const statusLoginHandler = async (c: Context<{ Bindings: Bindings }>) => {
     return c.json({ error: e instanceof Error ? e.message : 'Unknown error' }, 500);
   }
 };
-app.post('/api/status/login', statusLoginHandler);
 app.post('/status/login', statusLoginHandler);
 
 app.get('/feed.xml', async (c) => {
@@ -1284,19 +1478,6 @@ ${items}
   }
 });
 
-app.post('/api/subscribe', async (c) => {
-  try {
-    const body = await c.req.json<{ email?: string }>();
-    const email = (body.email || '').trim();
-    if (!isValidEmail(email)) return c.json({ error: 'Valid email is required' }, 400);
-    const token = randomToken(16);
-    await c.env.DB.prepare('INSERT INTO subscriptions (email, token) VALUES (?, ?) ON CONFLICT(email) DO UPDATE SET token = excluded.token')
-      .bind(email, token).run();
-    return c.json({ success: true });
-  } catch (e: unknown) {
-    return c.json({ error: e instanceof Error ? e.message : 'Unknown error' }, 500);
-  }
-});
 app.post('/subscribe', async (c) => {
   try {
     const body = await c.req.json<{ email?: string }>();
@@ -1311,16 +1492,6 @@ app.post('/subscribe', async (c) => {
   }
 });
 
-app.post('/api/unsubscribe', async (c) => {
-  try {
-    const body = await c.req.json<{ token?: string }>();
-    if (!body.token) return c.json({ error: 'Token is required' }, 400);
-    await c.env.DB.prepare('DELETE FROM subscriptions WHERE token = ?').bind(body.token).run();
-    return c.json({ success: true });
-  } catch (e: unknown) {
-    return c.json({ error: e instanceof Error ? e.message : 'Unknown error' }, 500);
-  }
-});
 app.post('/unsubscribe', async (c) => {
   try {
     const body = await c.req.json<{ token?: string }>();
@@ -1357,8 +1528,26 @@ app.post('/webhooks/:token', async (c) => {
 // ============================================================
 // 导出
 // ============================================================
+/**
+ * 剥掉 /api 前缀
+ *
+ * Pages 的 _worker.js 代理会把 /api/* 转发到 Worker,直连 Worker 的部署又只有裸路径,
+ * 所以两个前缀都得能work。以前的做法是每个路由注册两遍(/api/status 和 /status),
+ * 端点数直接翻倍不说,改了一个很容易漏掉另一个。
+ *
+ * 必须放在 app.fetch 之外:Hono 在 dispatch 阶段就从 request.url 提取了 path,
+ * 等到中间件里再改 c.req.raw,路由早就匹配完了,改了也不生效。
+ */
+function stripApiPrefix(request: Request): Request {
+  const url = new URL(request.url);
+  if (!url.pathname.startsWith('/api/')) return request;
+  url.pathname = url.pathname.slice('/api'.length);
+  // 传原 request 作为 init:method / headers / body 都被继承,只有 URL 变了
+  return new Request(url.toString(), request);
+}
+
 export default {
-  fetch: app.fetch,
+  fetch: (request: Request, env: Bindings, ctx: ExecutionContext) => app.fetch(stripApiPrefix(request), env, ctx),
   // 定时任务：探测 / 状态机 / 告警编排 / 每日聚合均在 ./scheduler.ts
   async scheduled(_event: ScheduledEvent, env: Bindings, ctx: ExecutionContext) {
     ctx.waitUntil(runScheduledTasks(env));
