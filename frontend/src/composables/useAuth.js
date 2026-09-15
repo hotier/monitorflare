@@ -1,5 +1,6 @@
 import { ref, computed } from 'vue';
-import { API_BASE, fetchT, ADMIN_TOKEN_KEY, ADMIN_PASSWORD_KEY } from '../utils/api';
+import { fetchT, ADMIN_TOKEN_KEY, ADMIN_PASSWORD_KEY } from '../utils/api';
+import { EP } from '../utils/endpoints';
 
 const storedToken = ref(sessionStorage.getItem(ADMIN_TOKEN_KEY) || '');
 const isAuthenticated = computed(() => !!storedToken.value && storedToken.value.length > 0);
@@ -22,7 +23,7 @@ export function useAuth() {
         loggingIn.value = true;
         loginError.value = '';
         try {
-            const res = await fetchT(`${API_BASE}/auth/login`, {
+            const res = await fetchT(EP.authLogin(), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ password: inputPassword.value }),

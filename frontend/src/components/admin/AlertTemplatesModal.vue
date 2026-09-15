@@ -191,7 +191,8 @@ import { computed, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useToast } from '../../composables/useToast';
 import { useConfirm } from '../../composables/useConfirm';
-import { API_BASE, authFetchT } from '../../utils/api';
+import { authFetchT } from '../../utils/api';
+import { EP } from '../../utils/endpoints';
 import { formatDateTime } from '../../utils/format';
 
 const { t, locale } = useI18n();
@@ -268,7 +269,7 @@ const load = async () => {
     loading.value = true;
     loadError.value = '';
     try {
-        const res = await authFetchT(`${API_BASE}/alert-templates`);
+        const res = await authFetchT(EP.templates());
         if (!res.ok) throw new Error(String(res.status));
         const d = await res.json();
         versions.value = d.versions || [];
@@ -318,7 +319,7 @@ const save = async () => {
     saving.value = true;
     try {
         const body = { name: draft.value.name, note: draft.value.note, payload: draft.value.payload, is_default: draft.value.is_default };
-        const url = draft.value.id ? `${API_BASE}/alert-templates/${draft.value.id}` : `${API_BASE}/alert-templates`;
+        const url = draft.value.id ? EP.template(draft.value.id) : EP.templates();
         const res = await authFetchT(url, {
             method: draft.value.id ? 'PUT' : 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -344,7 +345,7 @@ const saveAsNew = async () => {
     if (!draft.value || saving.value) return;
     saving.value = true;
     try {
-        const res = await authFetchT(`${API_BASE}/alert-templates`, {
+        const res = await authFetchT(EP.templates(), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -371,7 +372,7 @@ const saveAsNew = async () => {
 const duplicate = async (v) => {
     busyId.value = v.id;
     try {
-        const res = await authFetchT(`${API_BASE}/alert-templates/${v.id}?action=duplicate`, { method: 'POST' });
+        const res = await authFetchT(EP.template(v.id, { action: 'duplicate' }), { method: 'POST' });
         if (!res.ok) { addToast(t('alertTemplates.operationFailed'), 'error'); return; }
         await load();
     } catch {
@@ -384,7 +385,7 @@ const duplicate = async (v) => {
 const makeDefault = async (v) => {
     busyId.value = v.id;
     try {
-        const res = await authFetchT(`${API_BASE}/alert-templates/${v.id}?action=default`, { method: 'POST' });
+        const res = await authFetchT(EP.template(v.id, { action: 'default' }), { method: 'POST' });
         if (!res.ok) { addToast(t('alertTemplates.operationFailed'), 'error'); return; }
         addToast(t('alertTemplates.defaultSet'), 'success');
         await load();
@@ -401,7 +402,7 @@ const remove = async (v) => {
     if (!ok) return;
     busyId.value = v.id;
     try {
-        const res = await authFetchT(`${API_BASE}/alert-templates/${v.id}`, { method: 'DELETE' });
+        const res = await authFetchT(EP.template(v.id), { method: 'DELETE' });
         const d = await res.json().catch(() => ({}));
         if (!res.ok) {
             const key = d.error === 'cannot_delete_default' ? 'deleteDefaultError' : 'deleteLastError';

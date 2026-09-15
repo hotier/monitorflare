@@ -208,7 +208,8 @@
 import { ref, computed } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useToast } from '../../composables/useToast';
-import { API_BASE, authFetchT } from '../../utils/api';
+import { authFetchT } from '../../utils/api';
+import { EP } from '../../utils/endpoints';
 import { setAppLanguage, setAppTimezone } from '../../main';
 // 与状态页、详情页共用同一份站点配置,不再各拉一遍
 import * as resources from '../../composables/resources';
@@ -313,7 +314,7 @@ const save = async () => {
     try {
         const payload = { ...settings.value };
         if (statusPassword.value) payload.status_page_password = await sha256Hex(statusPassword.value);
-        const r = await authFetchT(`${API_BASE}/settings`, {
+        const r = await authFetchT(EP.settings(), {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload),
@@ -365,7 +366,7 @@ const importMonitors = async (e) => {
 
         let ok = 0;
         for (const item of items) {
-            const r = await authFetchT(`${API_BASE}/monitors`, {
+            const r = await authFetchT(EP.monitors(), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(item),

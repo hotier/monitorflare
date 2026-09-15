@@ -203,7 +203,8 @@ import { computed, ref } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useToast } from '../../composables/useToast';
 import { useConfirm } from '../../composables/useConfirm';
-import { API_BASE, authFetchT } from '../../utils/api';
+import { authFetchT } from '../../utils/api';
+import { EP } from '../../utils/endpoints';
 import * as resources from '../../composables/resources';
 import { formatDateFull } from '../../utils/format';
 import AppSelect from '../common/AppSelect.vue';
@@ -289,7 +290,7 @@ const create = async () => {
 
     submitting.value = true;
     try {
-        const r = await authFetchT(`${API_BASE}/incidents`, {
+        const r = await authFetchT(EP.incidents(), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload),
@@ -310,7 +311,7 @@ const create = async () => {
 
 const resolve = async (inc) => {
     try {
-        const r = await authFetchT(`${API_BASE}/incidents/${inc.id}`, {
+        const r = await authFetchT(EP.incident(inc.id), {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ status: 'resolved' }),
@@ -328,7 +329,7 @@ const remove = async (inc) => {
     const ok = await confirmDialog(t('incidents.deleteConfirm', { title: inc.title }));
     if (!ok) return;
     try {
-        const r = await authFetchT(`${API_BASE}/incidents/${inc.id}`, { method: 'DELETE' });
+        const r = await authFetchT(EP.incident(inc.id), { method: 'DELETE' });
         if (r.ok) {
             addToast(t('incidents.deleted'), 'success');
             fetchIncidents();

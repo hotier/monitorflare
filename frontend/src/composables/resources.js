@@ -10,7 +10,8 @@
 // 否则又会出现"同一个人被 4 处各拉一遍"的老问题(/settings 就是这么来的)。
 // ============================================================
 import { defineResource, defineResourceFamily } from './useResource';
-import { API_BASE, authFetchT, fetchT, withRetry, isStatusLocked } from '../utils/api';
+import { authFetchT, fetchT, withRetry, isStatusLocked } from '../utils/api';
+import { EP } from '../utils/endpoints';
 import { adminToken } from './useAuth';
 
 // ── 响应读取的统一收口 ──
@@ -48,9 +49,9 @@ const readPublic = async (res, what) => {
  * 未登录时**直接返回 null,不发请求** —— 这点很重要:管理接口收到 401 时
  * authFetchT 会整页刷新,如果没登录还硬发,就会变成刷新死循环。
  */
-const adminGet = async (path, what) => {
+const adminGet = async (url, what) => {
     if (!adminToken.value) return null;
-    const res = await withRetry(() => authFetchT(`${API_BASE}${path}`));
+    const res = await withRetry(() => authFetchT(url));
     if (!res.ok) throw await httpError(res, what);
     return res.json();
 };
@@ -77,7 +78,7 @@ export const siteSettings = defineResource('settings', {
         pick: (d) => (d && !d.status_page_password && d.status_page_visibility !== 'private' ? d : null),
     },
     fetcher: async () => {
-        const res = await withRetry(() => fetchT(`${API_BASE}/settings`));
+        const res = await withRetry(() => fetchT(EP.settings()));
         return readPublic(res, 'settings');
     },
 });
@@ -92,7 +93,7 @@ export const publicMonitors = defineResource('monitors-public-details', {
     ttl: 30_000,
     persist: { key: 'monitorflare_snapshot_monitors', version: 1, maxAge: 24 * 3600_000 },
     fetcher: async () => {
-        const res = await withRetry(() => fetchT(`${API_BASE}/monitors/public?detail=1`));
+        const res = await withRetry(() => fetchT(EP.publicMonitors()));
         return readPublic(res, 'monitors');
     },
 });
@@ -114,7 +115,7 @@ export const monitorDetail = defineResourceFamily('monitor-detail', {
     build: ({ id, range = '24h', limit = 50 }) => ({
         ttl: 30_000,
         fetcher: async () => {
-            const res = await withRetry(() => fetchT(`${API_BASE}/monitors/public/detail?id=${id}&range=${range}&limit=${limit}`));
+            const res = await withRetry(() => fetchT(EP.monitorDetail({ id, range, limit })));
             // 404 不是错误,是"这个 id 不存在"这个事实 —— 交给视图渲染未找到页
             if (res.status === 404) return { notFound: true };
             const data = await readPublic(res, 'monitor');
@@ -133,7 +134,7 @@ export const monitorDetail = defineResourceFamily('monitor-detail', {
 export const publicIncidents = defineResource('incidents-public', {
     ttl: 30_000,
     fetcher: async () => {
-        const res = await withRetry(() => fetchT(`${API_BASE}/incidents`));
+        const res = await withRetry(() => fetchT(EP.incidents()));
         return readPublic(res, 'incidents');
     },
 });
@@ -149,7 +150,7 @@ export const publicIncidents = defineResource('incidents-public', {
 export const adminMonitors = defineResource('monitors-admin', {
     ttl: 15_000,
     fetcher: async () => {
-        const d = await adminGet('/monitors', 'monitors');
+        const d = await adminGet(EP.monitors(), 'monitors');
         return d ? d.monitors : null;
     },
 });
@@ -157,13 +158,13 @@ export const adminMonitors = defineResource('monitors-admin', {
 /** 自检信息。状态栏里看的东西,跟着 60 秒的轮询节奏走 */
 export const health = defineResource('health', {
     ttl: 60_000,
-    fetcher: () => adminGet('/health', 'health'),
+    fetcher: () => adminGet(EP.health(), 'health'),
 });
 
 /** 通知渠道(管理弹窗用)。变更频率低,ttl 放宽到 1 分钟 */
 export const notificationChannels = defineResource('notification-channels', {
     ttl: 60_000,
-    fetcher: () => adminGet('/notification-channels', 'channels'),
+    fetcher: () => adminGet(EP.channels(), 'channels'),
 });
 
 /**
@@ -175,11 +176,11 @@ export const notificationChannels = defineResource('notification-channels', {
  */
 export const allIncidents = defineResource('incidents-all', {
     ttl: 30_000,
-    fetcher: () => adminGet('/incidents?status=all', 'incidents'),
+    fetcher: () => adminGet(EP.incidents({ status: 'all' }), 'incidents'),
 });
 
 /** API 密钥。含明文密钥的只有创建响应,列表本身是安全的 */
 export const apiKeys = defineResource('api-keys', {
     ttl: 60_000,
-    fetcher: () => adminGet('/api-keys', 'keys'),
+    fetcher: () => adminGet(EP.apiKeys(), 'keys'),
 });

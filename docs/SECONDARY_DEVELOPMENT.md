@@ -629,9 +629,13 @@ export type ChannelType =
 1. **路径**：只注册去 `/api` 前缀的路径（见 §4.1）。`/api/xxx` 由入口重写，不要注册两遍。
 2. **鉴权**：新路径若需保护，要加进 `PROTECTED_PREFIXES`；若需公开，加进 `PUBLIC_PATHS`。
    注意这两个数组里写的都是**裸路径**。
-3. **路由顺序**：Hono 按注册顺序匹配，**通配/参数路由必须放在具体路由之后**。例如 `/monitors/public/detail` 与 `/monitors/public/details` 都必须在 `/monitors/public/:id` 之前（否则 `detail` 会被当成 id 走 400），`POST /monitors/batch` 必须在 `POST /monitors/:id` 之前（否则批量操作会落进 action 分支返回 400）。
+3. **路由顺序**：Hono 按注册顺序匹配，**通配/参数路由必须放在具体路由之后**。
+   成员路由已收进集合（目标走 `?id=`），`/monitors/:id` 这类路径冲突已不存在；
+   现在最容易踩的是入口 `LEGACY_PATH_REWRITES` 的顺序——更具体的模式必须排在
+   前面（如 `/monitors/public/details` 要在 `/monitors/public` 之前），加新重写时沿用这条规则。
 4. **能合并就合并**：同一资源的多种口径优先用查询参数（`?status=`、`?include=`），
-   一次性的状态迁移优先用 `?action=`，导出/恢复这类反向操作优先用 method 区分。
+   一次性的状态迁移优先用 `?action=`，成员操作的目标一律 `?id=` 指认（不再占
+   `/xxx/:id`），导出/恢复这类反向操作优先用 method 区分。
    每多一个端点就多一处鉴权判断、多一处文档、多一处前端同步更新。
 5. **错误处理**：统一 `try/catch` + `c.json({ error: ... }, 500)`，参考现有写法。
 6. **前端调用**：用 `utils/api.js` 的 `fetchT`（自动超时 + 注入状态页 token）。
@@ -765,7 +769,7 @@ worker/src/
 | # | 风险 | 影响 | 缓解措施 |
 |---|---|---|---|
 | 1 | **无测试、无 lint** | 改 1500 行的 `index.ts` 极易失控 | 先做阶段 0 |
-| 2 | **路由顺序敏感** | 调整注册顺序可能导致 404 或错误匹配 | 拆分时严格保持原顺序；`/monitors/public/details` 与 `/monitors/:id` 类冲突要特别小心 |
+| 2 | **路由顺序敏感** | 调整注册顺序可能导致 404 或错误匹配 | 拆分时严格保持原顺序；`LEGACY_PATH_REWRITES` 里更具体的模式必须在前（`/monitors/public/details` 在 `/monitors/public` 之前） |
 | 3 | **前缀重写被绕过** | 线上 404（本地正常） | 路由只注册裸路径，`/api/` 一律靠 `stripApiPrefix`（§4.1）重写，不要恢复成对注册 |
 | 4 | **DB 迁移只改 `schema.sql`** | 线上老库缺列，运行时报错 | 必须同时改 `init.ts` 的 `INIT_STATEMENTS` 和 `ensureColumn()` |
 | 5 | **浅色模式 `!important` hack** | 改任何组件配色都可能破坏浅色模式 | 本次不改配色，风险不触发；如后续要改，先按 §5.2 做 token 化再拆 hack |
@@ -860,18 +864,21 @@ worker/src/
 | 方法 | 路径 | 鉴权 |
 |---|---|---|
 | GET | `/monitors` | 需鉴权。可选 `?id=1` / `?ids=1,2,3` 过滤、`?include=logs,stats` 附带日志与可用率 |
-| GET | `/monitors/public` | 公开（可选 `?id=1` / `?ids=1,2,3` 服务端过滤，上限 50 个；`?detail=1` 附带可用率与延迟） |
-| GET | `/monitors/public/detail?id=1` | 公开（单个监控的完整详情：日志 + 延迟曲线 + 关联事件；支持 `?range=` / `?limit=`） |
-| GET | `/monitors/public/details` | 公开，已并入 `/monitors/public?detail=1`，保留给旧调用方 |
-| GET | `/monitors/public/:id` | 公开，已并入 `/monitors/public/detail?id=`，保留给旧调用方 |
-| POST | `/monitors` | 需鉴权 |
-| DELETE | `/monitors/:id` | 需鉴权 |
-| PATCH | `/monitors/:id/config` | 需鉴权 |
-| POST | `/monitors/:id?action=check` | 需鉴权。立即探测一次 |
-| POST | `/monitors/:id?action=pause` | 需鉴权。暂停/恢复，body 可带 `{ paused: 0\|1 }`，不给则取反 |
-| POST | `/monitors/batch` | 需鉴权 |
-| PUT | `/monitors/reorder` | 需鉴权 |
+| GET | `/monitors?scope=public` | 公开（可选 `?id=1` / `?ids=1,2,3` 服务端过滤，上限 50 个；`?detail=1` 附带可用率与延迟） |
+| GET | `/monitors?scope=public&view=detail&id=1` | 公开（单个监控的完整详情：日志 + 延迟曲线 + 关联事件；支持 `?range=` / `?limit=`） |
+| POST | `/monitors` | 需鉴权。不带 `?action=` 即新建 |
+| POST | `/monitors?id=1&action=check` | 需鉴权。立即探测一次 |
+| POST | `/monitors?id=1&action=pause` | 需鉴权。暂停/恢复，body 可带 `{ paused: 0\|1 }`，不给则取反 |
+| POST | `/monitors?action=batch` | 需鉴权。批量暂停 / 恢复 / 删除 / 探测，目标 id 在 body 里 |
+| PUT | `/monitors?action=reorder` | 需鉴权 |
+| PATCH | `/monitors?id=1` | 需鉴权 |
+| DELETE | `/monitors?id=1` | 需鉴权 |
 
+> 一个资源只有一条路径：改配置 / 删除 / 探测 / 暂停这些成员操作都收进了 `/monitors`，
+> "操作哪一个"由 `?id=` 指认。`/monitors/:id`、`/monitors/:id/config`、`/monitors/public`、
+> `/monitors/public/detail`、`/monitors/batch`、`/monitors/reorder` 这些旧地址由入口
+> 重写表映射成参数形态，已发布的调用方不受影响。缺 `?id=` 或 id 非法一律 400。
+>
 > `/monitors/:id/logs` 与 `/monitors/:id/stats` 已并入 `GET /monitors?include=logs,stats`，
 > 响应形如 `{ monitors: [...], logs: { "3": [...] }, stats: { "3": {...} } }`。
 
@@ -882,26 +889,30 @@ worker/src/
 | GET | `/incidents` | 公开（中间件特判：默认只返回进行中的事件） |
 | GET | `/incidents?status=all` | 需鉴权（含已解决的历史事件） |
 | POST | `/incidents` | 需鉴权 |
-| PATCH | `/incidents/:id` | 需鉴权 |
-| DELETE | `/incidents/:id` | 需鉴权 |
+| PATCH | `/incidents?id=1` | 需鉴权 |
+| DELETE | `/incidents?id=1` | 需鉴权 |
 | GET | `/settings` | 公开（中间件特判） |
 | PUT | `/settings` | 需鉴权 |
 | GET | `/health` | 需鉴权 |
 | GET | `/notification-channels` | 需鉴权 |
-| POST | `/notification-channels` | 需鉴权 |
-| PATCH | `/notification-channels/:id` | 需鉴权 |
-| DELETE | `/notification-channels/:id` | 需鉴权 |
-| POST | `/notification-channels/:id?action=test` | 需鉴权。按该渠道绑定的模板版本发一条测试告警 |
-| POST | `/test-alert` | 需鉴权 |
+| POST | `/notification-channels` | 需鉴权。不带 `?action=` 即新建 |
+| PATCH | `/notification-channels?id=1` | 需鉴权 |
+| DELETE | `/notification-channels?id=1` | 需鉴权 |
+| POST | `/notification-channels?id=1&action=test` | 需鉴权。测单个渠道；不带 `?id=` 就是向全部已启用渠道发（原 `/test-alert`） |
 | GET | `/alert-templates` | 需鉴权 |
-| POST | `/alert-templates` | 需鉴权 |
-| PUT | `/alert-templates/:id` | 需鉴权 |
-| POST | `/alert-templates/:id?action=duplicate` | 需鉴权。复制一份出新版本 |
-| POST | `/alert-templates/:id?action=default` | 需鉴权。设为默认版本 |
-| DELETE | `/alert-templates/:id` | 需鉴权 |
+| POST | `/alert-templates` | 需鉴权。不带 `?action=` 即新建版本 |
+| PUT | `/alert-templates?id=1` | 需鉴权 |
+| POST | `/alert-templates?id=1&action=duplicate` | 需鉴权。复制一份出新版本 |
+| POST | `/alert-templates?id=1&action=default` | 需鉴权。设为默认版本 |
+| DELETE | `/alert-templates?id=1` | 需鉴权 |
 | GET | `/api-keys` | 需鉴权 |
 | POST | `/api-keys` | 需鉴权 |
-| DELETE | `/api-keys/:id` | 需鉴权 |
+| DELETE | `/api-keys?id=1` | 需鉴权 |
+
+> 事件、渠道、模板、密钥与监控是同一套路子：成员操作不占 `/xxx/:id`，目标由
+> `?id=` 指认，旧地址由入口重写表兼容；缺 `?id=` 一律 400，不会落到集合操作上。
+> 渠道与模板的 `?action=` 取值：渠道只有 `test`（带 `?id=` 测单个、不带测全部），
+> 模板有 `duplicate` 与 `default`。
 
 **开放 API（挂载在 `/v1`，`/api/v1` 由入口重写等价可达）**
 

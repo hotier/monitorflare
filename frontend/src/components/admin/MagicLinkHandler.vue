@@ -10,7 +10,8 @@
 <script setup>
 import { onMounted } from 'vue';
 import { useRouter } from 'vue-router';
-import { API_BASE, fetchT } from '../../utils/api';
+import { fetchT, ADMIN_TOKEN_KEY } from '../../utils/api';
+import { EP } from '../../utils/endpoints';
 
 const router = useRouter();
 
@@ -18,11 +19,11 @@ onMounted(async () => {
   const token = new URLSearchParams(window.location.hash.split('?')[1] || '').get('token') || '';
   if (!token) { router.replace('/admin'); return; }
   try {
-    const res = await fetchT(`${API_BASE}/auth/magic-link/verify?token=${encodeURIComponent(token)}`);
+    const res = await fetchT(EP.magicLinkVerify(token));
     if (res.ok) {
       const data = await res.json();
       if (data.token) {
-        sessionStorage.setItem('uptime_admin_token', data.token);
+        sessionStorage.setItem(ADMIN_TOKEN_KEY, data.token);
       }
     }
   } catch { /* fall through */ }

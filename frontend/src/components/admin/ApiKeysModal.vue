@@ -102,7 +102,8 @@ import { ref, computed, onMounted } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useToast } from '../../composables/useToast';
 import { useConfirm } from '../../composables/useConfirm';
-import { API_BASE, authFetchT } from '../../utils/api';
+import { authFetchT } from '../../utils/api';
+import { EP } from '../../utils/endpoints';
 import { formatDate } from '../../utils/format';
 import * as resources from '../../composables/resources';
 
@@ -128,7 +129,7 @@ const createKey = async () => {
     if (!newKeyName.value || creating.value) return;
     creating.value = true;
     try {
-        const r = await authFetchT(`${API_BASE}/api-keys`, {
+        const r = await authFetchT(EP.apiKeys(), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ name: newKeyName.value }),
@@ -167,7 +168,7 @@ const deleteKey = async (k) => {
     if (!ok) return;
     deletingId.value = k.id;
     try {
-        const r = await authFetchT(`${API_BASE}/api-keys/${k.id}`, { method: 'DELETE' });
+        const r = await authFetchT(EP.apiKey(k.id), { method: 'DELETE' });
         if (r.ok) {
             // keys 现在是 computed,不能就地赋值,交给资源重新拉一次
             await fetchKeys();

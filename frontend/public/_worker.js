@@ -32,7 +32,7 @@ export default {
         );
       }
 
-      // /api/monitors/public → /monitors/public
+      // /api/monitors?scope=public → /monitors?scope=public(剥掉前缀,参数原样带上)
       const targetPath = url.pathname.slice(4);
       const targetUrl = `${workerUrl.replace(/\/$/, '')}${targetPath}${url.search}`;
 

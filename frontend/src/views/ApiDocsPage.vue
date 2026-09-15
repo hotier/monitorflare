@@ -5,12 +5,8 @@
       :style="isDark ? 'background:rgba(3,7,18,0.82);backdrop-filter:blur(20px)' : 'background:rgba(255,255,255,0.82);backdrop-filter:blur(20px)'">
       <div class="max-w-6xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between gap-3">
         <router-link to="/" class="flex items-center gap-2.5 min-w-0 group">
-          <div class="w-8 h-8 rounded-lg bg-emerald-500/15 flex items-center justify-center border border-emerald-500/20 shrink-0">
-            <svg class="w-4 h-4 text-emerald-500" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
-              <path d="M3 12h4l2-7 3 14 2-7h7"/>
-            </svg>
-          </div>
-          <span class="font-bold text-slate-900 dark:text-white tracking-tight truncate group-hover:text-emerald-600 dark:group-hover:text-emerald-400 transition-colors">MonitorFlare</span>
+          <img :src="siteLogo" alt="Logo" class="w-8 h-8 rounded-lg object-contain shrink-0 transition-opacity group-hover:opacity-80" @error="logoFailed = true">
+          <span class="font-bold text-slate-900 dark:text-white tracking-tight truncate group-hover:text-emerald-600 dark:group-hover:text-emerald-400 transition-colors">{{ siteName }}</span>
           <span class="hidden sm:inline text-[10px] font-mono px-1.5 py-0.5 rounded-md bg-slate-100 dark:bg-white/5 text-slate-500 dark:text-slate-400 border border-slate-200 dark:border-white/10">API</span>
         </router-link>
 
@@ -52,7 +48,7 @@
         <!-- 目录(桌面端常驻,移动端隐藏) -->
         <aside class="hidden lg:block">
           <nav class="sticky top-24">
-            <p class="text-[11px] font-bold uppercase tracking-widest text-slate-400 dark:text-slate-600 mb-3.5">{{ t('apiDocs.tocTitle') }}</p>
+            <p class="text-[15px] font-bold tracking-wide text-slate-500 dark:text-slate-400 mb-3.5">{{ t('apiDocs.tocTitle') }}</p>
             <ul class="space-y-0.5 border-l border-slate-200 dark:border-white/10">
               <li v-for="item in toc" :key="item.id">
                 <a :href="`#${item.id}`" @click.prevent="scrollTo(item.id)"
@@ -73,8 +69,9 @@
             <div class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-600 dark:text-emerald-400 text-[11px] font-semibold mb-4">
               <i class="fas fa-plug text-[10px]"></i> REST / JSON
             </div>
-            <h1 class="text-2xl sm:text-3xl font-extrabold text-slate-900 dark:text-white tracking-tight mb-2">{{ t('apiDocs.title') }}</h1>
-            <p class="text-sm text-slate-500 dark:text-slate-400 max-w-3xl leading-relaxed">{{ t('apiDocs.subtitle') }}</p>
+            <h1 class="text-2xl sm:text-3xl font-extrabold text-slate-900 dark:text-white tracking-tight mb-1">{{ siteName }}</h1>
+            <p class="text-xs font-mono uppercase tracking-widest text-slate-400 dark:text-slate-500 mb-2">{{ t('apiDocs.title') }}</p>
+            <p class="text-sm text-slate-500 dark:text-slate-400 max-w-3xl leading-relaxed">{{ siteDesc }}</p>
           </div>
 
           <!-- ── 概述 ── -->
@@ -146,9 +143,10 @@
                     :title="isEpOpen(ep.id) ? t('apiDocs.epCollapse') : t('apiDocs.epExpand')">
                     <i class="fas fa-chevron-right text-[10px] text-slate-400 group-hover:text-slate-600 dark:group-hover:text-slate-200 transition-all duration-200 shrink-0"
                       :class="{ 'rotate-90': isEpOpen(ep.id) }" aria-hidden="true"></i>
-                    <!-- 同一路径可能有多个方法(GET 列表 + POST 新建),标签并列展示 -->
+                    <!-- 同一路径可能有多个方法(GET 列表 + POST 新建),标签并列展示。
+                         用去重后的 methodTags:一条 GET 可能有三种口径,标签只该出现一次 -->
                     <span class="flex items-center gap-1 shrink-0">
-                      <MethodTag v-for="m in ep.methods" :key="m.method" :method="m.method" />
+                    <MethodTag v-for="m in ep.methodTags" :key="m" :method="m" />
                     </span>
                     <code class="font-mono text-[13px] font-semibold text-slate-800 dark:text-slate-100 break-all">{{ ep.path }}</code>
                   </button>
@@ -176,22 +174,30 @@
                         </button>
                       </div>
                       <!-- 只在路径带变量时出现:解释 :id / :token 与参数表「路径」行的关系 -->
-                      <p v-if="ep.path.includes(':')" class="mt-1.5 text-[11px] text-slate-500 dark:text-slate-500 leading-relaxed">
+                      <p v-if="ep.methods.some(m => m.path.includes(':'))" class="mt-1.5 text-[11px] text-slate-500 dark:text-slate-500 leading-relaxed">
                         {{ t('apiDocs.pathVarHint') }}
                       </p>
 
                       <!-- 路径代表资源,方法代表动作:同一路径的每个方法一块,块间用分隔线 -->
-                      <div v-for="(m, mi) in ep.methods" :key="m.method" class="mt-4 space-y-3"
+                      <!-- key 用下标:同一条路径上可能有三个 GET,按方法名做 key 会撞 -->
+                      <div v-for="(m, mi) in ep.methods" :key="mi" class="mt-4 space-y-3"
                         :class="mi > 0 ? 'pt-4 border-t border-slate-200 dark:border-white/[0.06]' : ''">
-                        <div class="flex items-start gap-2">
+                        <div class="flex items-start gap-2 flex-wrap">
                           <MethodTag :method="m.method" />
+                          <!-- 同一资源的多种操作差别在路径与查询串上,卡片级完整地址给的是资源根路径,
+                               各自的 :id / ?action= 标在这里,点一下复制整条地址 -->
+                          <button v-if="methodTarget(ep, m)" type="button"
+                            @click="copyText(baseUrl + requestTarget(m))" :title="t('apiDocs.copy')"
+                            class="shrink-0 max-w-full font-mono text-[11px] leading-5 px-1.5 rounded border border-slate-200 dark:border-white/10 bg-slate-100/70 dark:bg-white/[0.04] text-slate-500 dark:text-slate-400 hover:text-emerald-500 hover:border-emerald-500/30 transition-colors cursor-pointer break-all text-left">
+                            <i class="fas mr-1" :class="copiedKey === baseUrl + requestTarget(m) ? 'fa-check' : 'fa-copy'"></i>{{ methodTarget(ep, m) }}
+                          </button>
                           <p class="flex-1 min-w-0 text-sm text-slate-600 dark:text-slate-400 leading-relaxed">{{ t(m.descKey) }}</p>
                         </div>
 
-                        <!-- 参数表。brief 端点(管理接口)不列参数:请求体字段随后台版本演进,写了就会过时 -->
-                        <template v-if="!ep.brief">
-                          <template v-if="m.params.length">
-                            <p class="text-[10px] font-bold uppercase tracking-widest text-slate-400 dark:text-slate-500">{{ t('apiDocs.paramsTitle') }}</p>
+                        <!-- 参数表。管理接口默认不列:请求体字段随后台版本演进,写了就会过时;
+                             但像 /api/monitors 这样靠查询参数取不同形式的,参数就是契约,照列 -->
+                        <template v-if="m.params.length">
+                          <p class="text-[10px] font-bold uppercase tracking-widest text-slate-400 dark:text-slate-500">{{ t('apiDocs.paramsTitle') }}</p>
                             <div class="rounded-xl border border-slate-200 dark:border-white/10 overflow-x-auto">
                               <table class="w-full text-left text-xs">
                                 <thead class="bg-slate-100/80 dark:bg-white/[0.04] text-slate-500 dark:text-slate-400">
@@ -220,8 +226,8 @@
                               </table>
                             </div>
                           </template>
-                          <p v-else class="text-xs text-slate-500 dark:text-slate-500">{{ t('apiDocs.noParams') }}</p>
-                        </template>
+                          <!-- 管理接口没参数就不占位:"无参数"这句是给公开接口看的 -->
+                          <p v-else-if="!ep.brief" class="text-xs text-slate-500 dark:text-slate-500">{{ t('apiDocs.noParams') }}</p>
 
                         <!-- 只有响应示例:请求的样子已经由上面的完整地址 + 参数表说清了,
                              再给一份请求报文只是同一件事换个写法 -->
@@ -277,18 +283,44 @@
 <script setup>
 // ApiDocsPage — 全站 API 调用说明
 //
-// 内容刻意做数据驱动:端点清单在下面的 GROUPS / ADMIN_ENDPOINTS 里维护,
-// 模板只负责渲染。新增接口时改这一处即可,不用来回改模板结构。
+// 内容刻意做数据驱动:端点清单在 utils/apiDocs.js 里维护,模板只负责渲染。
+// 新增接口时改那一处即可,不用来回改模板结构。
 //
 // SectionTitle / MethodTag / AuthBadge / CodeBlock 四个展示型子组件直接写在
 // 本文件的 setup 作用域里:它们只服务这一页,拆成独立 .vue 反而多一层目录。
-import { h, ref, computed, onMounted, onBeforeUnmount } from 'vue';
+import { h, ref, computed, watch, onMounted, onBeforeUnmount } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useTheme } from '../composables/useTheme';
 import { setAppLanguage } from '../main';
+import { PATHS, docPath } from '../utils/endpoints';
+import { DOC_GROUPS } from '../utils/apiDocs';
+// 站点品牌(图标/标题/简介)与管理页「站点设置」同源:复用同一份资源,不另拉一次
+import * as resources from '../composables/resources';
 
 const { t, locale } = useI18n();
 const { isDark, toggleTheme } = useTheme('theme');
+
+/* ---------------------------------- 品牌 ---------------------------------- */
+/** 资源首次加载完成前 data 是 null,模板直接取字段会报错 —— 用默认值兜底 */
+const DEFAULT_SETTINGS = { site_title: 'MonitorFlare', site_description: '', site_logo_url: '' };
+
+const settings = computed(() => resources.siteSettings.data.value || DEFAULT_SETTINGS);
+const siteName = computed(() => settings.value.site_title || 'MonitorFlare');
+/** 站点没填 logo、或 logo 地址失效时退回内置图标 */
+const logoFailed = ref(false);
+const siteLogo = computed(() => (logoFailed.value ? '' : settings.value.site_logo_url) || '/logo.svg');
+/** 简介同步站点描述;站点没写时保留这页原本的说明,免得首屏空一段 */
+const siteDesc = computed(() => settings.value.site_description || t('apiDocs.subtitle'));
+
+/** 品牌信息写进 document.title / meta,与状态页、管理页保持一致 */
+const applyBranding = () => {
+    if (settings.value.site_title) document.title = settings.value.site_title;
+    const meta = document.querySelector('meta[name=description]');
+    if (meta && settings.value.site_description) meta.content = settings.value.site_description;
+};
+// 资源可能在挂载后才到(首访),也可能被别的页面改过(管理页保存设置)
+watch(settings, applyBranding);
+applyBranding();
 
 /**
  * Base URL 一律取当前站点的 origin:文档可能跑在本地、沙箱、正式域名下,
@@ -308,11 +340,28 @@ syncBaseUrl();
  * 查询串里再传一次";把它示例化后,完整地址与请求行第一行逐字一致,
  * 免得读者对着 :id 猜该不该再拼 ?id=。
  */
-const requestTarget = (ep) => {
-    const path = ep.path
+const requestTarget = (ep, query = ep.query) => {
+    // 变量替换要覆盖查询串:?id=:id 与路径里的 :id 是同一个东西,
+    // 只替换路径会留下"路径给了 1、查询串里还是 :id"的半吊子地址
+    const raw = ep.path + (query ? `?${query}` : '');
+    return raw
         .replace(/:id/g, '1')
         .replace(/:token/g, 'YOUR_WEBHOOK_TOKEN');
-    return path + (ep.query ? `?${ep.query}` : '');
+};
+
+/**
+ * 方法级目标地址(示例化后)。
+ * 路径与卡片主路径不同时带上路径;像监控这样成员已收进集合的,
+ * 差别只剩查询串(?id=3、?action=batch),光看 ?action= 分不清打的是哪条地址 ——
+ * 所以查询串整体保留:相同则只留查询串,路径在卡头和完整地址里已经写过两遍了。
+ */
+const methodTarget = (ep, m) => {
+    const target = requestTarget(m);
+    if (m.path === ep.path) {
+        const i = target.indexOf('?');
+        return i === -1 ? '' : target.slice(i);
+    }
+    return target;
 };
 
 /** 只服务鉴权区那个示例:接口卡片已经不再展示请求报文(与参数表重复) */
@@ -382,465 +431,11 @@ const authRows = [
     { key: 'Cf-Access-Jwt-Assertion', titleKey: 'apiDocs.authCfTitle', descKey: 'apiDocs.authCfDesc' },
 ];
 const authExample = computed(() => buildRequest(
-    { method: 'GET', path: '/api/v1/monitors' },
+    { method: 'GET', path: docPath(PATHS.v1Monitors) },
     'key',
 ));
 
-/* --------------------------------- 接口清单 -------------------------------- */
-// 每个端点只声明 path / query / params 这些原始信息:完整地址由 requestTarget(ep) 拼,
-// 站点换了示例不用逐条改;请求长什么样交给参数表,不再另给一份请求报文。
-const GROUPS = [
-    {
-        id: 'public',
-        icon: 'fa-globe',
-        auth: 'none',
-        titleKey: 'apiDocs.publicTitle',
-        descKey: 'apiDocs.publicDesc',
-        endpoints: [
-            {
-                id: 'status',
-                method: 'GET',
-                path: '/api/status',
-                descKey: 'apiDocs.epStatus',
-                noteKey: 'apiDocs.epStatusNote',
-                params: [],
-                res: `{
-  "generated_at": "2026-09-15T08:00:00.000Z",
-  "monitors": [
-    {
-      "id": 1,
-      "name": "Main Site",
-      "url": "https://example.com",
-      "type": "http",
-      "status": "up",
-      "paused": 0,
-      "tags": "prod",
-      "last_check": "2026-09-15 08:00:00",
-      "uptime_7d": 99.9,
-      "uptime_30d": 99.8,
-      "latency": 132
-    }
-  ],
-  "incidents": [
-    {
-      "id": 12,
-      "title": "API 响应变慢",
-      "severity": "warning",
-      "status": "active",
-      "type": "incident",
-      "created_at": "2026-09-15 07:12:00",
-      "resolved_at": null
-    }
-  ]
-}`,
-            },
-            {
-                id: 'monitors-public',
-                method: 'GET',
-                path: '/monitors/public',
-                descKey: 'apiDocs.epMonitorsPublic',
-                noteKey: 'apiDocs.epMonitorsPublicNote',
-                params: [
-                    { name: 'id', in: 'query', def: '', descKey: 'apiDocs.pMonitorId' },
-                    { name: 'ids', in: 'query', def: '', descKey: 'apiDocs.pMonitorIds' },
-                    { name: 'detail', in: 'query', def: '', descKey: 'apiDocs.pDetail' },
-                ],
-                query: 'detail=1',
-                res: `// 不带 detail:精简数组
-[
-  {
-    "id": 1,
-    "name": "Main Site",
-    "url": "https://example.com",
-    "type": "http",
-    "status": "up",
-    "last_check": "2026-09-15 08:00:00",
-    "cert_expiry": 1767225600,
-    "domain_expiry": null,
-    "paused": 0,
-    "tags": "prod",
-    "check_ssl": 1
-  }
-]
-
-// 带 ?detail=1:同一批监控,附带延迟与可用率
-{
-  "monitors": [
-    {
-      "id": 1,
-      "name": "Main Site",
-      "url": "https://example.com",
-      "type": "http",
-      "status": "up",
-      "last_check": "2026-09-15 08:00:00",
-      "last_latency": 132,
-      "latency": 132,
-      "cert_expiry": 1767225600,
-      "domain_expiry": null,
-      "paused": 0,
-      "tags": "prod",
-      "check_ssl": 1,
-      "created_at": "2026-01-01 00:00:00",
-      "uptime_24h": 100,
-      "uptime_7d": 99.9,
-      "uptime_30d": 99.8,
-      "uptime_90d": 99.6,
-      "daily_stats": [
-        { "date": "2026-09-14", "up": 287, "total": 288 }
-      ],
-      "recent_latencies": [130, 128, 141]
-    }
-  ]
-}`,
-            },
-            {
-                id: 'monitor-public-detail',
-                method: 'GET',
-                path: '/monitors/public/detail',
-                descKey: 'apiDocs.epMonitorDetail',
-                noteKey: 'apiDocs.epMonitorDetailNote',
-                params: [
-                    { name: 'id', in: 'query', def: '', required: true, descKey: 'apiDocs.pId' },
-                    { name: 'range', in: 'query', def: '24h', descKey: 'apiDocs.pRange' },
-                    { name: 'limit', in: 'query', def: '50', descKey: 'apiDocs.pLimitLogs' },
-                ],
-                query: 'id=1&range=24h&limit=50',
-                res: `{
-  "monitor": {
-    "id": 1,
-    "name": "Main Site",
-    "url": "https://example.com",
-    "type": "http",
-    "method": "GET",
-    "interval": 5,
-    "status": "up",
-    "last_check": "2026-09-15 08:00:00",
-    "last_latency": 132,
-    "latency": 132,
-    "paused": 0,
-    "tags": "prod",
-    "uptime_24h": 100,
-    "uptime_7d": 99.9,
-    "uptime_30d": 99.8,
-    "uptime_90d": 99.6,
-    "daily_stats": [{ "date": "2026-09-14", "up": 287, "total": 288 }]
-  },
-  "logs": [
-    { "id": 9812, "created_at": "2026-09-15 08:00:00", "status_code": 200, "latency": 132, "is_fail": 0, "reason": null }
-  ],
-  "latency_series": [
-    { "created_at": "2026-09-15 07:00:00", "latency": 128 }
-  ],
-  "incidents": []
-}`,
-            },
-            {
-                id: 'incidents-active',
-                method: 'GET',
-                path: '/incidents',
-                descKey: 'apiDocs.epIncidentsActive',
-                noteKey: 'apiDocs.epIncidentsActiveNote',
-                params: [],
-
-                res: `[
-  {
-    "id": 12,
-    "title": "API 响应变慢",
-    "description": "正在排查数据库连接池",
-    "severity": "warning",
-    "status": "active",
-    "type": "incident",
-    "scheduled_start": null,
-    "scheduled_end": null,
-    "affected_monitors": "1,2",
-    "created_at": "2026-09-15 07:12:00",
-    "updated_at": "2026-09-15 07:40:00",
-    "resolved_at": null
-  }
-]`,
-            },
-            {
-                id: 'feed',
-                method: 'GET',
-                path: '/feed.xml',
-                descKey: 'apiDocs.epFeed',
-                noteKey: 'apiDocs.epFeedNote',
-                params: [],
-
-                res: `<?xml version="1.0" encoding="UTF-8"?>
-<rss version="2.0">
-  <channel>
-    <title>MonitorFlare</title>
-    <description>Status updates</description>
-    <item>
-      <title>API 响应变慢 [active]</title>
-      <pubDate>Tue, 15 Sep 2026 07:12:00 GMT</pubDate>
-      <description>正在排查数据库连接池</description>
-    </item>
-  </channel>
-</rss>`,
-            },
-            {
-                id: 'subscribe',
-                method: 'POST',
-                path: '/api/subscribe',
-                descKey: 'apiDocs.epSubscribe',
-                params: [
-                    { name: 'email', in: 'body', def: '', required: true, descKey: 'apiDocs.pEmail' },
-                ],
-                res: `{ "success": true }`,
-            },
-            {
-                id: 'unsubscribe',
-                method: 'POST',
-                path: '/api/unsubscribe',
-                descKey: 'apiDocs.epUnsubscribe',
-                noteKey: 'apiDocs.epUnsubscribeNote',
-                params: [
-                    { name: 'token', in: 'body', def: '', required: true, descKey: 'apiDocs.pUnsubToken' },
-                ],
-                res: `{ "success": true }`,
-            },
-        ],
-    },
-    {
-        id: 'v1',
-        icon: 'fa-key',
-        auth: 'key',
-        titleKey: 'apiDocs.v1Title',
-        descKey: 'apiDocs.v1Desc',
-        endpoints: [
-            {
-                id: 'v1-monitors',
-                method: 'GET',
-                path: '/api/v1/monitors',
-                descKey: 'apiDocs.epV1Monitors',
-                noteKey: 'apiDocs.epV1MonitorsNote',
-                params: [],
-
-                res: `[
-  {
-    "id": 1,
-    "name": "Main Site",
-    "url": "https://example.com",
-    "type": "http",
-    "method": "GET",
-    "interval": 5,
-    "status": "up",
-    "retry_count": 2,
-    "last_check": "2026-09-15 08:00:00",
-    "last_latency": 132,
-    "keyword": null,
-    "user_agent": null,
-    "tags": "prod",
-    "paused": 0,
-    "check_ssl": 1,
-    "check_domain": 0,
-    "alert_after_failures": 2,
-    "sort_order": 0,
-    "created_at": "2026-01-01 00:00:00"
-  }
-]`,
-            },
-            {
-                id: 'v1-logs',
-                method: 'GET',
-                path: '/api/v1/logs',
-                descKey: 'apiDocs.epV1Logs',
-                noteKey: 'apiDocs.epV1LogsNote',
-                params: [
-                    { name: 'monitor_id', in: 'query', def: '全部', descKey: 'apiDocs.pMonitorId' },
-                    { name: 'since', in: 'query', def: '', descKey: 'apiDocs.pSince' },
-                    { name: 'until', in: 'query', def: '', descKey: 'apiDocs.pUntil' },
-                    { name: 'limit', in: 'query', def: '100', descKey: 'apiDocs.pLimit5000' },
-                    { name: 'offset', in: 'query', def: '0', descKey: 'apiDocs.pOffset' },
-                ],
-                query: 'monitor_id=1&limit=100&offset=0&since=2026-09-01',
-                res: `{
-  "total": 1284,
-  "limit": 100,
-  "offset": 0,
-  "logs": [
-    {
-      "id": 1284,
-      "monitor_id": 1,
-      "status_code": 200,
-      "latency": 132,
-      "is_fail": 0,
-      "reason": null,
-      "created_at": "2026-09-15 08:00:00"
-    }
-  ]
-}`,
-            },
-            {
-                id: 'v1-incidents',
-                method: 'GET',
-                path: '/api/v1/incidents',
-                descKey: 'apiDocs.epV1Incidents',
-                params: [
-                    { name: 'limit', in: 'query', def: '500', descKey: 'apiDocs.pLimit1000' },
-                ],
-                query: 'limit=200',
-                res: `[
-  {
-    "id": 12,
-    "title": "API 响应变慢",
-    "description": "正在排查数据库连接池",
-    "severity": "warning",
-    "status": "resolved",
-    "type": "incident",
-    "affected_monitors": "1,2",
-    "created_at": "2026-09-15 07:12:00",
-    "resolved_at": "2026-09-15 09:02:00"
-  }
-]`,
-            },
-            {
-                id: 'v1-uptime',
-                method: 'GET',
-                path: '/api/v1/uptime',
-                descKey: 'apiDocs.epV1Uptime',
-                noteKey: 'apiDocs.epV1UptimeNote',
-                params: [
-                    { name: 'days', in: 'query', def: '30', descKey: 'apiDocs.pDays' },
-                ],
-                query: 'days=90',
-                res: `{
-  "days": 90,
-  "daily": [
-    {
-      "monitor_id": 1,
-      "date": "2026-09-14",
-      "total_checks": 288,
-      "successful_checks": 287,
-      "avg_latency": 130.4
-    }
-  ],
-  "summary": [
-    {
-      "id": 1,
-      "name": "Main Site",
-      "url": "https://example.com",
-      "type": "http",
-      "uptime": 99.8,
-      "checks": 25920
-    }
-  ]
-}`,
-            },
-            {
-                id: 'v1-export',
-                method: 'GET',
-                path: '/api/v1/export',
-                descKey: 'apiDocs.epV1Export',
-                noteKey: 'apiDocs.epV1ExportNote',
-                params: [
-                    { name: 'limit', in: 'query', def: '1000', descKey: 'apiDocs.pLimit5000' },
-                ],
-                query: 'limit=5000',
-                res: `{
-  "app": "MonitorFlare",
-  "version": 1,
-  "exported_at": "2026-09-15T08:00:00.000Z",
-  "monitors": [{ "id": 1, "name": "Main Site" }],
-  "logs": [{ "id": 1284, "monitor_id": 1, "is_fail": 0 }],
-  "incidents": [],
-  "uptime": [{ "monitor_id": 1, "date": "2026-09-14", "total_checks": 288, "successful_checks": 287, "avg_latency": 130.4 }],
-  "settings": { "site_title": "MonitorFlare" },
-  "notification_channels": [{ "id": 1, "type": "telegram", "name": "Ops", "enabled": 1 }]
-}`,
-            },
-        ],
-    },
-    {
-        id: 'webhook',
-        icon: 'fa-satellite-dish',
-        auth: 'token',
-        titleKey: 'apiDocs.webhookTitle',
-        descKey: 'apiDocs.webhookDesc',
-        endpoints: [
-            {
-                id: 'webhook-inbound',
-                method: 'POST',
-                path: '/webhooks/:token',
-                descKey: 'apiDocs.epWebhook',
-                noteKey: 'apiDocs.epWebhookNote',
-                params: [
-                    { name: 'token', in: 'path', def: '', required: true, descKey: 'apiDocs.pWebhookToken' },
-                    { name: 'title', in: 'body', def: '', required: true, descKey: 'apiDocs.pWebhookTitle' },
-                    { name: 'description', in: 'body', def: '', descKey: 'apiDocs.pWebhookDesc' },
-                    { name: 'severity', in: 'body', def: 'info', descKey: 'apiDocs.pWebhookSeverity' },
-                ],
-                res: `HTTP/1.1 201 Created
-
-{ "success": true }`,
-            },
-        ],
-    },
-];
-
-/**
- * 管理接口。
- * 与公开接口共用同一套端点卡片(方法标签 + 完整地址 + 说明 + 参数表),只是标记 brief:
- * 不列参数表 —— 它们的请求体就是后台表单,字段随版本演进,文档里逐项写出来必然过时。
- * [方法, 路径, i18n 后缀]
- */
-const ADMIN_ENDPOINTS = [
-    ['GET', '/api/health', 'adminHealth'],
-    // 列表 / 日志 / 可用率是同一个端点的三种口径,靠 ?include= 与 ?id= 区分
-    ['GET', '/api/monitors', 'adminMonitorsList'],
-    ['GET', '/api/monitors?id=:id&include=logs', 'adminMonitorLogs'],
-    ['GET', '/api/monitors?include=stats', 'adminMonitorStats'],
-    ['POST', '/api/monitors', 'adminMonitorsCreate'],
-    ['POST', '/api/monitors/:id?action=check', 'adminMonitorCheck'],
-    ['POST', '/api/monitors/:id?action=pause', 'adminMonitorPause'],
-    ['PATCH', '/api/monitors/:id/config', 'adminMonitorConfig'],
-    ['DELETE', '/api/monitors/:id', 'adminMonitorDelete'],
-    ['POST', '/api/monitors/batch', 'adminMonitorsBatch'],
-    ['PUT', '/api/monitors/reorder', 'adminMonitorsReorder'],
-    ['GET', '/api/incidents?status=all', 'adminIncidentsAll'],
-    ['POST', '/api/incidents', 'adminIncidentsCreate'],
-    ['PATCH', '/api/incidents/:id', 'adminIncidentsUpdate'],
-    ['DELETE', '/api/incidents/:id', 'adminIncidentsDelete'],
-    ['GET', '/api/settings', 'adminSettingsGet'],
-    ['PUT', '/api/settings', 'adminSettings'],
-    ['GET', '/api/notification-channels', 'adminChannelsList'],
-    ['POST', '/api/notification-channels', 'adminChannelsCreate'],
-    ['PATCH', '/api/notification-channels/:id', 'adminChannelsUpdate'],
-    ['DELETE', '/api/notification-channels/:id', 'adminChannelsDelete'],
-    ['POST', '/api/notification-channels/:id?action=test', 'adminChannelsTest'],
-    ['POST', '/api/test-alert', 'adminTestAlert'],
-    ['GET', '/api/alert-templates', 'adminTemplatesList'],
-    ['POST', '/api/alert-templates', 'adminTemplatesCreate'],
-    ['PUT', '/api/alert-templates/:id', 'adminTemplatesUpdate'],
-    ['POST', '/api/alert-templates/:id?action=duplicate', 'adminTemplatesDuplicate'],
-    ['POST', '/api/alert-templates/:id?action=default', 'adminTemplatesDefault'],
-    ['DELETE', '/api/alert-templates/:id', 'adminTemplatesDelete'],
-    ['GET', '/api/api-keys', 'adminKeysList'],
-    ['POST', '/api/api-keys', 'adminKeysCreate'],
-    ['DELETE', '/api/api-keys/:id', 'adminKeysDelete'],
-    // 导出与恢复是同一个资源:GET 拿快照,POST 用快照覆盖整站
-    ['GET', '/api/backup', 'adminBackupExport'],
-    ['POST', '/api/backup', 'adminBackupRestore'],
-].map(([method, path, key], i) => ({
-    id: `admin-${i}`,
-    method,
-    path,
-    descKey: `apiDocs.${key}`,
-    brief: true,
-    params: [],
-}));
-
-const ADMIN_GROUP = {
-    id: 'admin',
-    icon: 'fa-user-lock',
-    auth: 'admin',
-    titleKey: 'apiDocs.adminTitle',
-    descKey: 'apiDocs.adminIntro',
-    endpoints: ADMIN_ENDPOINTS,
-};
-
+/* --------------------------------- 错误码 ---------------------------------- */
 const ERROR_ROWS = [
     { code: '400', descKey: 'apiDocs.err400' },
     { code: '401', descKey: 'apiDocs.err401' },
@@ -849,39 +444,8 @@ const ERROR_ROWS = [
     { code: '503', descKey: 'apiDocs.err503' },
 ];
 
-/**
- * 按路径合并:路径是资源(/api/monitors),方法是动作(GET 列表 / POST 新建)。
- * 拆成两张卡片会让人误以为是两个不同的端点,路径还得重复一遍;
- * 合并后一张卡片里按方法分块,共用同一条路径与完整地址。
- * 顺序按每个路径第一次出现的位置,接口清单读起来仍是从上到下。
- */
-const mergeByPath = (endpoints) => {
-    const order = [];
-    const byPath = new Map();
-    for (const ep of endpoints) {
-        if (!byPath.has(ep.path)) {
-            byPath.set(ep.path, []);
-            order.push(ep.path);
-        }
-        byPath.get(ep.path).push(ep);
-    }
-    return order.map(path => {
-        const list = byPath.get(path);
-        return {
-            id: list[0].id,          // 展开状态按卡片记,取第一个方法的 id 即可
-            path,
-            brief: list[0].brief,
-            methods: list.map(({ method, descKey, noteKey, params, res }) =>
-                ({ method, descKey, noteKey, params, res })),
-        };
-    });
-};
-
-// 管理接口并入同一循环,不再单独用一张表格渲染 —— 两处排版天然一致。
-const docGroups = computed(() => [...GROUPS, ADMIN_GROUP].map(g => ({
-    ...g,
-    endpoints: mergeByPath(g.endpoints),
-})));
+/** 端点清单见 utils/apiDocs.js:路径由 PATHS 派生,与前端实际调用同源 */
+const docGroups = DOC_GROUPS;
 const errorRows = ERROR_ROWS;
 
 /* ------------------------------ 接口展开/收起 ------------------------------ */
@@ -982,6 +546,9 @@ const CodeBlock = {
 onMounted(() => {
     syncBaseUrl(); // 挂载后 origin 一定可用,再同步一次兜底
     document.addEventListener('click', onClickOutside);
+
+    // 站点设置可能已被别的页面拉过(命中缓存直接返回),失败也不影响文档渲染
+    resources.siteSettings.ensure().then(applyBranding);
 
     // 目录高亮:取当前视口顶部附近最后一个进入视野的 section
     observer = new IntersectionObserver((entries) => {

@@ -56,7 +56,10 @@ export default defineConfig(({ mode }) => {
           runtimeCaching: [
             {
               // 状态页公开数据:离线可看最近快照
-              urlPattern: ({ url }) => url.pathname.startsWith('/api/status') || url.pathname.startsWith('/monitors/public'),
+              // 公开口径现在是 /api/monitors?scope=public,只匹配前缀会把管理口径
+              // 的响应也塞进离线缓存 —— 必须连参数一起认
+              urlPattern: ({ url }) => url.pathname.startsWith('/api/status')
+                || (url.pathname.startsWith('/api/monitors') && url.searchParams.get('scope') === 'public'),
               handler: 'NetworkFirst',
               options: { cacheName: 'monitorflare-status', expiration: { maxEntries: 10, maxAgeSeconds: 24 * 3600 } },
             },

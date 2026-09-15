@@ -330,6 +330,62 @@ describe('邮件订阅', () => {
   });
 });
 
+describe('端点收敛后的参数形态', () => {
+  // 直接打新地址。旧地址虽然由重写表兜着,但那层迟早要拆,真正要长期保证的是
+  // 这些参数形态 —— 只测旧地址的话,重写一拆就没人验证新契约了。
+  const admin = (method: string, payload?: unknown): RequestInit => ({
+    method,
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer test-admin-key' },
+    ...(payload === undefined ? {} : { body: JSON.stringify(payload) }),
+  });
+
+  it('?scope=public 是公开口径,免鉴权', async () => {
+    const res = await call('/monitors?scope=public');
+    expect(res.status).toBe(200);
+    expect(Array.isArray(await res.json())).toBe(true);
+  });
+
+  it('scope 拼错报 400,不静默落到管理口径', async () => {
+    // 静默回落的结果是状态页吃一个 401,不报出来根本看不出是参数拼错了
+    expect((await call('/monitors?scope=Public')).status).toBe(400);
+  });
+
+  it('不带 scope 是管理口径,要鉴权', async () => {
+    expect((await call('/monitors')).status).toBe(401);
+  });
+
+  it('?view=detail 必须且只能给一个 id', async () => {
+    expect((await call('/monitors?scope=public&view=detail')).status).toBe(400);
+    expect((await call('/monitors?scope=public&view=detail&id=1,2')).status).toBe(400);
+  });
+
+  it('集合地址上 PUT 只认 ?action=reorder', async () => {
+    expect((await call('/monitors', admin('PUT', { ids: [1] }))).status).toBe(400);
+    expect((await call('/monitors?action=reorder', admin('PUT', { ids: [1] }))).status).toBe(200);
+  });
+
+  it('集合地址上 POST ?action=batch 与创建互不干扰', async () => {
+    // 少了 action 就会掉进创建分支,报的是"缺 name 或 url"而不是"ids 不合法"
+    expect((await call('/monitors?action=batch', admin('POST', { ids: [] }))).status).toBe(400);
+    const res = await call('/monitors?action=batch', admin('POST', { action: 'check', ids: [999999] }));
+    expect(await res.json()).toEqual({ success: true, affected: 0 });
+  });
+
+  it('成员地址上 PATCH 就是改配置,不再有 /config 子路径', async () => {
+    const inserted = await env.DB.prepare(
+      "INSERT INTO monitors (name, url, type, status, sort_order) VALUES ('cfg', 'https://example.com', 'http', 'UP', 0)"
+    ).run();
+    const id = Number(inserted.meta.last_row_id);
+
+    const res = await call(`/monitors/${id}`, admin('PATCH', { name: 'cfg-renamed' }));
+    expect(res.status).toBe(200);
+    expect((await env.DB.prepare('SELECT name FROM monitors WHERE id = ?').bind(id).first<{ name: string }>())?.name)
+      .toBe('cfg-renamed');
+
+    await env.DB.prepare('DELETE FROM monitors WHERE id = ?').bind(id).run();
+  });
+});
+
 describe('批量操作', () => {
   const batch = (payload: unknown): RequestInit => ({
     method: 'POST',
@@ -641,6 +697,39 @@ describe('端点收敛后的行为', () => {
     expect(res.status).toBe(404);
   });
 
+  it('成员操作直接打集合地址,目标交给 ?id=', async () => {
+    // 收敛后的正式形态:/monitors/:id 只剩旧地址兼容,新调用一律带 ?id=
+    const paused = await call(`/monitors?id=${id}&action=pause`, postJson({ paused: 1 }));
+    expect(await paused.json()).toEqual({ success: true, paused: true });
+    const resumed = await call(`/monitors?id=${id}&action=pause`, postJson({ paused: 0 }));
+    expect(await resumed.json()).toEqual({ success: true, paused: false });
+  });
+
+  it('PATCH 与 DELETE 也用 ?id= 指认目标', async () => {
+    const headers = { Authorization: 'Bearer test-admin-key' };
+    const patched = await call(`/monitors?id=${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', ...headers },
+      body: JSON.stringify({ name: 'renamed-by-id' }),
+    });
+    expect(patched.status).toBe(200);
+    expect((await env.DB.prepare('SELECT name FROM monitors WHERE id = ?').bind(id).first<{ name: string }>())?.name)
+      .toBe('renamed-by-id');
+
+    const removed = await call(`/monitors?id=${id}`, { method: 'DELETE', headers });
+    expect(removed.status).toBe(200);
+    expect(await env.DB.prepare('SELECT id FROM monitors WHERE id = ?').bind(id).first()).toBeNull();
+  });
+
+  it('缺 id 的成员操作报 400,不会打到整张表', async () => {
+    const headers = { Authorization: 'Bearer test-admin-key' };
+    // 尤其 DELETE:没有目标就放行等于清空整张表
+    expect((await call('/monitors', { method: 'DELETE', headers })).status).toBe(400);
+    expect((await call('/monitors?id=abc', { method: 'DELETE', headers })).status).toBe(400);
+    expect((await call('/monitors', { method: 'PATCH', headers, body: '{}' })).status).toBe(400);
+    expect((await call('/monitors?action=check', { method: 'POST', headers })).status).toBe(400);
+  });
+
   /* --------------------------- /incidents 的两种口径 --------------------------- */
 
   it('默认口径免鉴权,?status=all 需鉴权', async () => {
@@ -683,5 +772,73 @@ describe('端点收敛后的行为', () => {
     // 缺 data.monitors 视为格式不对
     const bad = await call('/backup', postJson({ nope: true }));
     expect(bad.status).toBe(400);
+  });
+
+  /* -------------------- 其余资源的成员操作也走 ?id= -------------------- */
+
+  it('缺 id 的成员操作一律 400', async () => {
+    const headers = { Authorization: 'Bearer test-admin-key' };
+    // DELETE 打到集合上等于清空整张表,PATCH / PUT 则是没有目标
+    for (const path of ['/incidents', '/notification-channels', '/alert-templates', '/api-keys']) {
+      expect((await call(path, { method: 'DELETE', headers })).status, path).toBe(400);
+    }
+    expect((await call('/incidents', { method: 'PATCH', headers, body: '{}' })).status).toBe(400);
+    expect((await call('/notification-channels', { method: 'PATCH', headers, body: '{}' })).status).toBe(400);
+    expect((await call('/alert-templates', { method: 'PUT', headers, body: '{}' })).status).toBe(400);
+    // 带 id 的动作缺了 id 同样是 400,而不是落到"新建"分支上
+    expect((await call('/alert-templates?action=duplicate', { method: 'POST', headers })).status).toBe(400);
+    // 新建请求带 ?id= 是调用方写错
+    expect((await call('/alert-templates?id=1', postJson({ name: 'x' }))).status).toBe(400);
+    expect((await call('/notification-channels?id=1', postJson({ type: 'webhook', name: 'x', config: {} }))).status).toBe(400);
+  });
+
+  it('事件用 ?id= 改与删', async () => {
+    const json = { 'Content-Type': 'application/json', Authorization: 'Bearer test-admin-key' };
+    const created = await call('/incidents', { method: 'POST', headers: json, body: JSON.stringify({ title: 'id 收敛测试' }) });
+    const { id: incId } = await created.json() as { id: number };
+    try {
+      expect((await call(`/incidents?id=${incId}`, { method: 'PATCH', headers: json, body: JSON.stringify({ status: 'resolved' }) })).status).toBe(200);
+      expect((await env.DB.prepare('SELECT status FROM incidents WHERE id = ?').bind(incId).first<{ status: string }>())?.status)
+        .toBe('resolved');
+    } finally {
+      expect((await call(`/incidents?id=${incId}`, { method: 'DELETE', headers: { Authorization: 'Bearer test-admin-key' } })).status).toBe(200);
+    }
+    expect(await env.DB.prepare('SELECT id FROM incidents WHERE id = ?').bind(incId).first()).toBeNull();
+  });
+
+  it('渠道用 ?id= 改与删,?action=test 两种口径', async () => {
+    const json = { 'Content-Type': 'application/json', Authorization: 'Bearer test-admin-key' };
+    await call('/notification-channels', {
+      method: 'POST', headers: json,
+      body: JSON.stringify({ type: 'webhook', name: 'id 收敛测试', config: { url: 'https://example.com/hook' } }),
+    });
+    const row = await env.DB.prepare('SELECT id FROM notification_channels WHERE name = ?')
+      .bind('id 收敛测试').first<{ id: number }>();
+    const chId = row?.id;
+    expect(chId).toBeTruthy();
+    try {
+      expect((await call(`/notification-channels?id=${chId}`, { method: 'PATCH', headers: json, body: JSON.stringify({ enabled: 0 }) })).status).toBe(200);
+      expect((await env.DB.prepare('SELECT enabled FROM notification_channels WHERE id = ?').bind(chId).first<{ enabled: number }>())?.enabled).toBe(0);
+      // 带 ?id= 测单个;渠道不存在时先判 404,而不是落到 action 校验上
+      expect((await call('/notification-channels?action=test&id=999999', { method: 'POST', headers: { Authorization: 'Bearer test-admin-key' } })).status).toBe(404);
+    } finally {
+      expect((await call(`/notification-channels?id=${chId}`, { method: 'DELETE', headers: { Authorization: 'Bearer test-admin-key' } })).status).toBe(200);
+    }
+    expect(await env.DB.prepare('SELECT id FROM notification_channels WHERE id = ?').bind(chId).first()).toBeNull();
+  });
+
+  it('模板与密钥用 ?id= 指认目标', async () => {
+    const headers = { Authorization: 'Bearer test-admin-key' };
+    const json = { 'Content-Type': 'application/json', ...headers };
+
+    // 更新与复制都要求目标存在:不存在是 404,不是 200 空操作
+    expect((await call('/alert-templates?id=999999', { method: 'PUT', headers: json, body: '{}' })).status).toBe(404);
+    expect((await call('/alert-templates?action=duplicate&id=999999', { method: 'POST', headers })).status).toBe(404);
+
+    const created = await call('/api-keys', { method: 'POST', headers: json, body: JSON.stringify({ name: 'id 收敛测试' }) });
+    expect(created.status).toBe(201);
+    const row = await env.DB.prepare('SELECT id FROM api_keys WHERE name = ?').bind('id 收敛测试').first<{ id: number }>();
+    expect((await call(`/api-keys?id=${row?.id}`, { method: 'DELETE', headers })).status).toBe(200);
+    expect(await env.DB.prepare('SELECT id FROM api_keys WHERE id = ?').bind(row?.id).first()).toBeNull();
   });
 });

@@ -1,6 +1,9 @@
 // ── 网络增强：超时控制 + 自动重试 ──
 
-export const API_BASE = '/api';
+// API_BASE 定义在 endpoints.js（它属于"地址"而不是"传输"），这里转出去
+// 是为了让已经 import 它的调用方不用改。
+import { EP } from './endpoints';
+export { API_BASE } from './endpoints';
 export const STATUS_TOKEN_KEY = 'monitorflare_status_token';
 /** 管理端登录态:token 与遗留的密码缓存,登出/401 时都要清 */
 export const ADMIN_TOKEN_KEY = 'uptime_admin_token';
@@ -65,7 +68,7 @@ export const isStatusLocked = async (res) => {
  * 状态页登录:密码换 token
  */
 export const statusLogin = async (password) => {
-    const res = await fetchT(`${API_BASE}/status/login`, {
+    const res = await fetchT(EP.statusLogin(), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ password }),

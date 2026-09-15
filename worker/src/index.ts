@@ -71,16 +71,30 @@ app.use('/*', cors({
 // 这里的路径都是剥掉 /api 前缀之后的形态(见文件末尾的 stripApiPrefix),
 // 所以 /api/status 与 /status 只需写一次裸路径。
 const PUBLIC_PATHS = [
-  '/auth/', '/monitors/public', '/status', '/feed.xml', '/subscribe', '/unsubscribe', '/webhooks/',
+  '/auth/', '/status', '/feed.xml', '/subscribe', '/unsubscribe', '/webhooks/',
 ];
 const PROTECTED_PREFIXES = ['/monitors', '/notification-channels', '/alert-templates', '/incidents', '/settings', '/test-alert', '/health', '/api-keys', '/backup', '/v1'];
 
 // 私密模式下需锁定的公开接口(前缀匹配)
 const STATUS_LOCK_PATHS = [
-  '/monitors/public', '/incidents', '/settings', '/feed.xml', '/status', '/subscribe', '/unsubscribe',
+  '/incidents', '/settings', '/feed.xml', '/status', '/subscribe', '/unsubscribe',
 ];
 // 私密模式下始终放行(登录/管理认证)
 const STATUS_LOCK_EXEMPT = ['/status/login', '/auth/', '/webhooks/'];
+
+/**
+ * 公开口径的监控读取:GET /monitors?scope=public。
+ *
+ * /monitors/public 并进 /monitors 之后,"这一读是公开还是管理"不再体现在路径上,
+ * 只能看参数 —— 免鉴权放行与私密模式锁定都得用同一个判断,否则两处会各说各话。
+ */
+function isPublicMonitorRead(req: { path: string; method: string; query: (k: string) => string | undefined }): boolean {
+  if (req.path !== '/monitors' || req.method !== 'GET') return false;
+  const scope = req.query('scope');
+  // 凡是带着 scope 来的,都算冲着公开口径。非法取值也要放给 handler 去报 400:
+  // 挡在鉴权层的话,写错 scope 的人只会收到 401,看不出是参数拼错了。
+  return scope !== undefined && scope !== '';
+}
 
 app.use('/*', async (c, next) => {
   if (c.req.method === 'OPTIONS') return await next();
@@ -99,7 +113,7 @@ app.use('/*', async (c, next) => {
   // 私密模式:锁定状态页公开接口
   if (visibility === 'private'
     && !STATUS_LOCK_EXEMPT.some(p => path.startsWith(p))
-    && STATUS_LOCK_PATHS.some(p => path === p || path.startsWith(p + '/'))) {
+    && (isPublicMonitorRead(c.req) || STATUS_LOCK_PATHS.some(p => path === p || path.startsWith(p + '/')))) {
     const authHeader = c.req.header('Authorization');
     const token = authHeader ? authHeader.replace(/^Bearer\s+/i, '') : '';
     if (token) {
@@ -116,6 +130,8 @@ app.use('/*', async (c, next) => {
   // GET /incidents 默认口径是"进行中的事件",状态页直接读,免鉴权;
   // ?status=all 是管理口径(含已解决的历史事件),不能靠路径判断了,必须往下走鉴权。
   if (path === '/incidents' && c.req.method === 'GET' && c.req.query('status') !== 'all') return await next();
+  // 状态页读监控走 ?scope=public,免鉴权;缺省的管理口径不在这里放行。
+  if (isPublicMonitorRead(c.req)) return await next();
   if (path === '/settings' && c.req.method === 'GET') return await next();
 
   const needsAuth = PROTECTED_PREFIXES.some(r => path.startsWith(r));
@@ -291,8 +307,29 @@ app.get('/auth/oauth/callback/:provider', async (c) => {
  *   /monitors?id=3                           → 只要这一个(可逗号分隔多个)
  *   /monitors?id=3&include=logs&limit=50     → 多带一份 { logs: { 3: [...] } }
  *   /monitors?include=stats                  → 多带一份 { stats: { id: {...} } }
+ *
+ * 公开口径也在这条地址上,由 ?scope=public 切过去(状态页免鉴权读):
+ *   ?scope=public                            → 公开清单
+ *   ?scope=public&detail=1                   → 清单 + 可用率与延迟
+ *   ?scope=public&view=detail&id=3           → 单个监控的详情对象(日志/曲线/事件)
  */
 app.get('/monitors', async (c) => {
+  const scope = c.req.query('scope');
+  // 拼错要报出来:否则 scope=Public 会静默落到管理口径上,状态页直接吃一个 401
+  if (scope !== undefined && scope !== '' && scope !== 'public') {
+    return c.json({ error: 'Invalid scope. Use scope=public or omit it' }, 400);
+  }
+  if (scope === 'public') {
+    if (c.req.query('view') === 'detail') {
+      const detailIds = parseIdList(c.req.query('id'), c.req.query('ids'));
+      // 详情返回的是单个监控的对象,给多个 id 没有对应的形状
+      if (detailIds === 'invalid' || !detailIds || detailIds.length !== 1) {
+        return c.json({ error: 'Invalid monitor id' }, 400);
+      }
+      return handlePublicDetail(c, detailIds[0]);
+    }
+    return handlePublicList(c, isDetailRequested(c.req.query('detail')));
+  }
   try {
     const ids = parseIdList(c.req.query('id'), c.req.query('ids'));
     if (ids === 'invalid') return c.json({ error: 'Invalid monitor id' }, 400);
@@ -446,12 +483,8 @@ async function handlePublicList(c: Context<{ Bindings: Bindings }>, detail: bool
   }
 }
 
-// 公开监控清单:?id= / ?ids= 精确取某几个(不传即全量),?detail=1 额外给可用率与延迟。
-// 单监控的日志、延迟曲线、关联事件不在这里 —— 那些走 /monitors/public/detail?id=。
-app.get('/monitors/public', async (c) => handlePublicList(c, isDetailRequested(c.req.query('detail'))));
-
-// 旧路径,与 /monitors/public?detail=1 完全等价,保留给已发布的脚本和旧版前端
-app.get('/monitors/public/details', async (c) => handlePublicList(c, true));
+// 公开口径的注册点已搬到 GET /monitors?scope=public 里。/monitors/public、
+// /monitors/public/details 这两个老地址由入口的重写表映射过去,这里不再注册。
 
 /**
  * 单监控公开详情:基础信息 + uptime + 90 天历史 + 日志 + 延迟曲线 + 事件。
@@ -533,23 +566,39 @@ async function handlePublicDetail(c: Context<{ Bindings: Bindings }>, id: number
   }
 }
 
-// 单监控详情用 ?id= 指定:与列表接口同一套取数方式,地址里不再出现占位符。
-// 必须注册在 /monitors/public/:id 之前,否则 "detail" 会被当成 id 走 400。
-app.get('/monitors/public/detail', async (c) => {
-  const ids = parseIdList(c.req.query('id'), c.req.query('ids'));
-  // 必须且只能给一个 id:这里返回的是单个监控的对象,多个 id 没有对应的形状
-  if (ids === 'invalid' || !ids || ids.length !== 1) return c.json({ error: 'Invalid monitor id' }, 400);
-  return handlePublicDetail(c, ids[0]);
-});
+// 单监控详情同样搬到了 ?scope=public&view=detail&id=;/monitors/public/detail 与
+// /monitors/public/:id 两个老地址同样交给重写表。
 
-// 旧路径,与 /monitors/public/detail?id= 完全等价,保留给已发布的脚本和旧版前端
-app.get('/monitors/public/:id', async (c) => {
-  const id = Number(c.req.param('id'));
-  if (!Number.isInteger(id) || id <= 0) return c.json({ error: 'Invalid monitor id' }, 400);
-  return handlePublicDetail(c, id);
-});
+/**
+ * 成员操作的目标 id。
+ *
+ * 各资源的 /xxx/:id 收进 /xxx 之后,"操作哪一个"不再体现在路径上,只能从 ?id= 读。
+ * 缺 id 或 id 不合法必须挡在任何写操作之前 —— 否则一次误请求会打到整张表上。
+ */
+function targetId(c: Context<{ Bindings: Bindings }>): number | null {
+  const n = Number(c.req.query('id'));
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
 
 app.post('/monitors', async (c) => {
+  const action = c.req.query('action') || '';
+  // 批量操作:与"创建单个"同是对集合的写,合并后靠 ?action=batch 区分
+  if (action === 'batch') return handleMonitorBatch(c);
+  // 单个监控的手动动作:目标由 ?id= 指认,不再占 /monitors/:id 这条路径
+  if (action === 'check' || action === 'pause') {
+    const id = targetId(c);
+    if (id === null) return c.json({ error: 'id is required. Use ?action=' + action + '&id=1' }, 400);
+    return handleMonitorAction(c, action, id);
+  }
+  // 拼错的 action 不能静默当成"新建":那会凭空多出一条监控
+  if (action !== '') {
+    return c.json({ error: 'Invalid action. Use ?action=batch, ?action=check or ?action=pause' }, 400);
+  }
+  // ?id= 只用来指认成员操作的目标,出现在新建请求上是调用方写错了 ——
+  // 旧地址 /monitors/:id 落到这里也是这个分支,不能让它变成"新建一条监控"
+  if (c.req.query('id') !== undefined) {
+    return c.json({ error: 'id is only valid with ?action=check or ?action=pause' }, 400);
+  }
   try {
     const body = await c.req.json<Partial<Monitor>>();
     const { name, keyword, user_agent, tags, request_headers, request_body } = body;
@@ -627,8 +676,10 @@ app.post('/monitors', async (c) => {
   }
 });
 
-app.delete('/monitors/:id', async (c) => {
-  const id = c.req.param('id');
+app.delete('/monitors', async (c) => {
+  const id = targetId(c);
+  // 没有目标就拒绝:DELETE 打到集合上等于清空整张表,不能靠"误传"触发
+  if (id === null) return c.json({ error: 'id is required. Use ?id=1' }, 400);
   try {
     // 级联删掉派生数据,否则孤儿行会一直占用日聚合/小时桶并污染备份
     await c.env.DB.prepare('DELETE FROM logs WHERE monitor_id = ?').bind(id).run();
@@ -642,8 +693,15 @@ app.delete('/monitors/:id', async (c) => {
   }
 });
 
-app.patch('/monitors/:id/config', async (c) => {
-  const id = c.req.param('id');
+/**
+ * 改某一个监控的配置。
+ *
+ * 目标几经收敛:/monitors/:id/config → /monitors/:id → /monitors?id=。
+ * 到这一步监控相关只剩 /monitors 这一条地址,成员与集合的差别全在 ?id= 上。
+ */
+app.patch('/monitors', async (c) => {
+  const id = targetId(c);
+  if (id === null) return c.json({ error: 'id is required. Use ?id=1' }, 400);
   try {
     const body = await c.req.json<Partial<Monitor>>();
     const fields: string[] = [];
@@ -724,7 +782,8 @@ app.patch('/monitors/:id/config', async (c) => {
   }
 });
 
-app.post('/monitors/batch', async (c) => {
+/** 批量操作。原 /monitors/batch,合并后由 POST /monitors?action=batch 调进来 */
+async function handleMonitorBatch(c: Context<{ Bindings: Bindings }>) {
   try {
     const body = await c.req.json<{ ids: number[]; action: 'pause' | 'resume' | 'delete' | 'check' }>();
     if (!Array.isArray(body.ids) || body.ids.length === 0) return c.json({ error: 'ids is required' }, 400);
@@ -756,9 +815,16 @@ app.post('/monitors/batch', async (c) => {
   } catch (e: unknown) {
     return c.json({ error: e instanceof Error ? e.message : 'Unknown error' }, 500);
   }
-});
+}
 
-app.put('/monitors/reorder', async (c) => {
+/**
+ * 集合上的排序:原 /monitors/reorder。
+ *
+ * 改的是集合的顺序而不是某一个成员,挂在 PUT /monitors 上用 ?action=reorder 区分,
+ * 这之后 /monitors 底下不再有子路径。
+ */
+app.put('/monitors', async (c) => {
+  if (c.req.query('action') !== 'reorder') return c.json({ error: 'Invalid action. Use ?action=reorder' }, 400);
   try {
     const body = await c.req.json<{ ids: number[] }>();
     if (!Array.isArray(body.ids)) return c.json({ error: 'ids is required' }, 400);
@@ -775,13 +841,12 @@ app.put('/monitors/reorder', async (c) => {
  * 单个监控的手动动作。
  *
  * 手动探测与暂停原本各占一个端点(/monitors/:id/check、/monitors/:id/pause),
- * 它们都不修改资源本身、只触发一次状态迁移,合并后靠 ?action= 区分:
- *   POST /monitors/3?action=check   立即探测一次
- *   POST /monitors/3?action=pause   暂停/恢复;body 可带 { paused: 0|1 },不给则按当前状态取反
+ * 它们都不修改资源本身、只触发一次状态迁移;后来 /monitors/:id 本身也收进了
+ * /monitors,这两个动作就成了 POST /monitors 上 ?action= 的取值,目标靠 ?id= 指认:
+ *   POST /monitors?action=check&id=3   立即探测一次
+ *   POST /monitors?action=pause&id=3   暂停/恢复;body 可带 { paused: 0|1 },不给则按当前状态取反
  */
-app.post('/monitors/:id', async (c) => {
-  const id = c.req.param('id');
-  const action = c.req.query('action') || '';
+async function handleMonitorAction(c: Context<{ Bindings: Bindings }>, action: 'check' | 'pause', id: number) {
   try {
     if (action === 'check') {
       const monitor = await c.env.DB.prepare(`SELECT ${MONITOR_COLUMNS} FROM monitors WHERE id = ?`)
@@ -789,26 +854,23 @@ app.post('/monitors/:id', async (c) => {
       if (!monitor) return c.json({ error: 'Monitor not found' }, 404);
       return c.json(await performMonitorCheck(monitor, c.env));
     }
-    if (action === 'pause') {
-      // 优先使用 body.paused,未提供时按当前状态取反(toggle)
-      let paused: number | undefined;
-      try {
-        const body = await c.req.json<{ paused?: number }>();
-        paused = body?.paused;
-      } catch { /* no body */ }
-      const row = await c.env.DB.prepare('SELECT paused FROM monitors WHERE id = ?').bind(id).first<{ paused: number }>();
-      if (!row) return c.json({ error: 'Monitor not found' }, 404);
-      const next = paused !== undefined ? (paused ? 1 : 0) : (row.paused ? 0 : 1);
-      await c.env.DB.prepare('UPDATE monitors SET paused = ?, status = ?, retry_count = 0 WHERE id = ?')
-        .bind(next, next ? 'PAUSED' : 'UP', id).run();
-      invalidate('public');
-      return c.json({ success: true, paused: !!next });
-    }
-    return c.json({ error: 'Invalid action. Use ?action=check or ?action=pause' }, 400);
+    // 优先使用 body.paused,未提供时按当前状态取反(toggle)
+    let paused: number | undefined;
+    try {
+      const body = await c.req.json<{ paused?: number }>();
+      paused = body?.paused;
+    } catch { /* no body */ }
+    const row = await c.env.DB.prepare('SELECT paused FROM monitors WHERE id = ?').bind(id).first<{ paused: number }>();
+    if (!row) return c.json({ error: 'Monitor not found' }, 404);
+    const next = paused !== undefined ? (paused ? 1 : 0) : (row.paused ? 0 : 1);
+    await c.env.DB.prepare('UPDATE monitors SET paused = ?, status = ?, retry_count = 0 WHERE id = ?')
+      .bind(next, next ? 'PAUSED' : 'UP', id).run();
+    invalidate('public');
+    return c.json({ success: true, paused: !!next });
   } catch (e: unknown) {
     return c.json({ error: e instanceof Error ? e.message : 'Unknown error' }, 500);
   }
-});
+}
 
 // ============================================================
 // 事件公告
@@ -868,8 +930,9 @@ app.post('/incidents', async (c) => {
   }
 });
 
-app.patch('/incidents/:id', async (c) => {
-  const id = c.req.param('id');
+app.patch('/incidents', async (c) => {
+  const id = targetId(c);
+  if (id === null) return c.json({ error: 'id is required. Use ?id=1' }, 400);
   try {
     const body = await c.req.json<{ title?: string; description?: string; severity?: string; status?: string; affected_monitors?: string }>();
     const fields: string[] = [];
@@ -893,8 +956,10 @@ app.patch('/incidents/:id', async (c) => {
   }
 });
 
-app.delete('/incidents/:id', async (c) => {
-  const id = c.req.param('id');
+app.delete('/incidents', async (c) => {
+  const id = targetId(c);
+  // 没有目标就拒绝:DELETE 打到集合上等于清空整张表
+  if (id === null) return c.json({ error: 'id is required. Use ?id=1' }, 400);
   try {
     await c.env.DB.prepare('DELETE FROM incidents WHERE id = ?').bind(id).run();
     invalidate('public');
@@ -979,6 +1044,27 @@ app.get('/notification-channels', async (c) => {
 });
 
 app.post('/notification-channels', async (c) => {
+  const action = c.req.query('action') || '';
+  // 测试告警(原 /test-alert 与 /notification-channels/:id/test)合成一个取值:
+  // 带 ?id= 测单个渠道,不带就向全部已启用渠道发。测的都是渠道,差别只在目标范围,
+  // 拆成两条地址反而看不出这层关系。
+  if (action === 'test') {
+    const raw = c.req.query('id');
+    try {
+      if (raw === undefined) return c.json({ success: await sendTestAlert(c.env) });
+      const id = targetId(c);
+      if (id === null) return c.json({ error: 'Invalid id. Use ?id=1' }, 400);
+      const channel = await c.env.DB.prepare('SELECT * FROM notification_channels WHERE id = ?')
+        .bind(id).first<NotificationChannel>();
+      if (!channel) return c.json({ error: 'Channel not found' }, 404);
+      return c.json({ success: await sendTestAlert(c.env, [channel]) });
+    } catch (e: unknown) {
+      return c.json({ error: e instanceof Error ? e.message : 'Unknown error' }, 500);
+    }
+  }
+  if (action !== '') return c.json({ error: 'Invalid action. Use ?action=test' }, 400);
+  // 新建不带 ?id=:id 只用来指认成员操作的目标
+  if (c.req.query('id') !== undefined) return c.json({ error: 'id is only valid with ?action=test' }, 400);
   try {
     const body = await c.req.json<{ type: string; name: string; config: Record<string, unknown>; enabled?: number; template_version_id?: number | null }>();
     if (!body.type || !body.name || !body.config) return c.json({ error: 'Missing required fields' }, 400);
@@ -1007,8 +1093,9 @@ app.post('/notification-channels', async (c) => {
   }
 });
 
-app.patch('/notification-channels/:id', async (c) => {
-  const id = c.req.param('id');
+app.patch('/notification-channels', async (c) => {
+  const id = targetId(c);
+  if (id === null) return c.json({ error: 'id is required. Use ?id=1' }, 400);
   try {
     const body = await c.req.json<{ name?: string; enabled?: number; config?: Record<string, unknown>; template_version_id?: number | null }>();
     const fields: string[] = [];
@@ -1044,8 +1131,9 @@ app.patch('/notification-channels/:id', async (c) => {
   }
 });
 
-app.delete('/notification-channels/:id', async (c) => {
-  const id = c.req.param('id');
+app.delete('/notification-channels', async (c) => {
+  const id = targetId(c);
+  if (id === null) return c.json({ error: 'id is required. Use ?id=1' }, 400);
   try {
     await c.env.DB.prepare('DELETE FROM notification_channels WHERE id = ?').bind(id).run();
     return c.json({ success: true });
@@ -1054,32 +1142,9 @@ app.delete('/notification-channels/:id', async (c) => {
   }
 });
 
-/**
- * 单个渠道的手动动作。
- *
- * 原 /notification-channels/:id/test:发一条测试告警,验证"这个渠道会收到什么"
- * (按它绑定的模板版本渲染)。合并进子资源路径后靠 ?action= 区分。
- */
-app.post('/notification-channels/:id', async (c) => {
-  const id = c.req.param('id');
-  try {
-    if (c.req.query('action') !== 'test') return c.json({ error: "Invalid action. Use ?action=test" }, 400);
-    const channel = await c.env.DB.prepare('SELECT * FROM notification_channels WHERE id = ?').bind(id).first<NotificationChannel>();
-    if (!channel) return c.json({ error: 'Channel not found' }, 404);
-    const sent = await sendTestAlert(c.env, [channel]);
-    return c.json({ success: sent });
-  } catch (e: unknown) {
-    return c.json({ error: e instanceof Error ? e.message : 'Unknown error' }, 500);
-  }
-});
-
-app.post('/test-alert', async (c) => {
-  try {
-    return c.json({ success: await sendTestAlert(c.env) });
-  } catch (e: unknown) {
-    return c.json({ error: e instanceof Error ? e.message : 'Unknown error' }, 500);
-  }
-});
+// 原 /test-alert 与 /notification-channels/:id/test 都并进了
+// POST /notification-channels?action=test(带不带 ?id= 决定测单个还是全部),
+// 老地址交给重写表。
 
 // ============================================================
 // 告警模板版本
@@ -1107,21 +1172,46 @@ app.get('/alert-templates', async (c) => {
   }
 });
 
+/**
+ * 单个版本的手动动作与"新建"共用一个 POST。
+ *
+ * 原 /alert-templates/:id/duplicate 与 /:id/default 都不改内容,只改变版本集合
+ * (多一份副本 / 换默认指向),收进来之后靠 ?action= 区分,目标由 ?id= 指认:
+ *   ?action=duplicate&id=3   复制一份出新版本(改文案前先留个底,也方便做 A/B 措辞)
+ *   ?action=default&id=3     设为默认版本
+ * 不带 action 就是新建版本 —— 顺带要求也不带 ?id=,免得两种语义含混。
+ */
 app.post('/alert-templates', async (c) => {
+  const action = c.req.query('action') || '';
+  const hasId = c.req.query('id') !== undefined;
+  const id = hasId ? targetId(c) : null;
   try {
+    if (action === 'duplicate' || action === 'default') {
+      if (id === null) return c.json({ error: `id is required. Use ?action=${action}&id=1` }, 400);
+      if (action === 'duplicate') {
+        const newId = await duplicateTemplateVersion(c.env, id);
+        if (!newId) return c.json({ error: 'Template version not found' }, 404);
+        return c.json({ success: true, id: newId });
+      }
+      await setDefaultVersion(c.env, id);
+      return c.json({ success: true });
+    }
+    if (action !== '') return c.json({ error: 'Invalid action. Use ?action=duplicate or ?action=default' }, 400);
+    if (hasId) return c.json({ error: 'id is only valid with ?action=duplicate or ?action=default' }, 400);
     const body = await c.req.json<{ name?: string; note?: string; payload?: Partial<AlertTemplatePayload>; is_default?: boolean }>();
-    const id = await createTemplateVersion(c.env, {
+    const created = await createTemplateVersion(c.env, {
       name: body.name || '', note: body.note ?? null,
       payload: body.payload || {}, isDefault: body.is_default === true,
     });
-    return c.json({ success: true, id });
+    return c.json({ success: true, id: created });
   } catch (e: unknown) {
     return c.json({ error: e instanceof Error ? e.message : 'Unknown error' }, 500);
   }
 });
 
-app.put('/alert-templates/:id', async (c) => {
-  const id = Number(c.req.param('id'));
+app.put('/alert-templates', async (c) => {
+  const id = targetId(c);
+  if (id === null) return c.json({ error: 'id is required. Use ?id=1' }, 400);
   try {
     const body = await c.req.json<{ name?: string; note?: string; payload?: Partial<AlertTemplatePayload>; is_default?: boolean }>();
     const exists = await c.env.DB.prepare('SELECT id FROM alert_templates WHERE id = ?').bind(id).first<AlertTemplateVersion>();
@@ -1136,35 +1226,12 @@ app.put('/alert-templates/:id', async (c) => {
   }
 });
 
-/**
- * 单个模板版本的手动动作。
- *
- * 原 /alert-templates/:id/duplicate 与 /:id/default。两者都不改内容、
- * 只改变版本集合(多一份副本 / 换默认指向),合并后靠 ?action= 区分:
- *   ?action=duplicate   复制一份出新版本(改文案前先留个底,也方便做 A/B 措辞)
- *   ?action=default     设为默认版本
- */
-app.post('/alert-templates/:id', async (c) => {
-  const id = Number(c.req.param('id'));
-  const action = c.req.query('action') || '';
-  try {
-    if (action === 'duplicate') {
-      const newId = await duplicateTemplateVersion(c.env, id);
-      if (!newId) return c.json({ error: 'Template version not found' }, 404);
-      return c.json({ success: true, id: newId });
-    }
-    if (action === 'default') {
-      await setDefaultVersion(c.env, id);
-      return c.json({ success: true });
-    }
-    return c.json({ error: 'Invalid action. Use ?action=duplicate or ?action=default' }, 400);
-  } catch (e: unknown) {
-    return c.json({ error: e instanceof Error ? e.message : 'Unknown error' }, 500);
-  }
-});
+// 原 /alert-templates/:id/duplicate 与 /:id/default 已并入上面这条 POST,
+// 老地址交给重写表。
 
-app.delete('/alert-templates/:id', async (c) => {
-  const id = Number(c.req.param('id'));
+app.delete('/alert-templates', async (c) => {
+  const id = targetId(c);
+  if (id === null) return c.json({ error: 'id is required. Use ?id=1' }, 400);
   try {
     // 默认版本是所有未绑定渠道的兜底文案,删掉它等于让一部分告警没东西可发 —— 直接挡掉
     const target = await c.env.DB.prepare('SELECT is_default FROM alert_templates WHERE id = ?').bind(id).first<{ is_default: number }>();
@@ -1203,8 +1270,10 @@ app.post('/api-keys', async (c) => {
   }
 });
 
-app.delete('/api-keys/:id', async (c) => {
-  const id = c.req.param('id');
+app.delete('/api-keys', async (c) => {
+  const id = targetId(c);
+  // 没有目标就拒绝:DELETE 打到集合上等于清空整张表
+  if (id === null) return c.json({ error: 'id is required. Use ?id=1' }, 400);
   try {
     await c.env.DB.prepare('DELETE FROM api_keys WHERE id = ?').bind(id).run();
     return c.json({ success: true });
@@ -1538,10 +1607,59 @@ app.post('/webhooks/:token', async (c) => {
  * 必须放在 app.fetch 之外:Hono 在 dispatch 阶段就从 request.url 提取了 path,
  * 等到中间件里再改 c.req.raw,路由早就匹配完了,改了也不生效。
  */
+/**
+ * 旧路径 → 新路径(参数化)的重写表。
+ *
+ * 端点收敛之后 /monitors/public、/monitors/batch 这些都只剩参数形态了,但已经发布的
+ * 脚本和旧版前端还在打老地址。这里在入口统一映射:路由表里只留新端点,老地址继续可用,
+ * 等调用方都迁过去之后,整张表删掉即可。
+ *
+ * 顺序有意义:更具体的模式必须排在前面,否则 /monitors/public/details 会先被
+ * /monitors/public 吃掉。
+ */
+const LEGACY_PATH_REWRITES: [RegExp, string][] = [
+  [/^\/monitors\/public\/details\/?$/, '/monitors?scope=public&detail=1'],
+  [/^\/monitors\/public\/detail\/?$/, '/monitors?scope=public&view=detail'],
+  [/^\/monitors\/public\/(\d+)\/?$/, '/monitors?scope=public&view=detail&id=$1'],
+  [/^\/monitors\/public\/?$/, '/monitors?scope=public'],
+  [/^\/monitors\/batch\/?$/, '/monitors?action=batch'],
+  [/^\/monitors\/reorder\/?$/, '/monitors?action=reorder'],
+  // 成员地址:目标交回查询串。放在最后一条 —— 前面的 public / batch / reorder
+  // 都是具体的段,排在这里之前才不会被数字规则抢先吃掉
+  [/^\/monitors\/(\d+)\/config\/?$/, '/monitors?id=$1'],
+  [/^\/monitors\/(\d+)\/?$/, '/monitors?id=$1'],
+  [/^\/incidents\/(\d+)\/?$/, '/incidents?id=$1'],
+  // 带后缀的成员动作要先匹配:否则 /:id/test 会被下面的 /:id 吃掉
+  [/^\/notification-channels\/(\d+)\/test\/?$/, '/notification-channels?action=test&id=$1'],
+  [/^\/notification-channels\/(\d+)\/?$/, '/notification-channels?id=$1'],
+  [/^\/alert-templates\/(\d+)\/duplicate\/?$/, '/alert-templates?action=duplicate&id=$1'],
+  [/^\/alert-templates\/(\d+)\/default\/?$/, '/alert-templates?action=default&id=$1'],
+  [/^\/alert-templates\/(\d+)\/?$/, '/alert-templates?id=$1'],
+  [/^\/api-keys\/(\d+)\/?$/, '/api-keys?id=$1'],
+  [/^\/test-alert\/?$/, '/notification-channels?action=test'],
+];
+
 function stripApiPrefix(request: Request): Request {
   const url = new URL(request.url);
-  if (!url.pathname.startsWith('/api/')) return request;
-  url.pathname = url.pathname.slice('/api'.length);
+  let rewritten = false;
+  if (url.pathname.startsWith('/api/')) {
+    url.pathname = url.pathname.slice('/api'.length);
+    rewritten = true;
+  }
+  for (const [pattern, target] of LEGACY_PATH_REWRITES) {
+    const m = url.pathname.match(pattern);
+    if (!m) continue;
+    const [path, targetQuery = ''] = target.split('?');
+    // 捕获组可能落在路径里(/monitors/$1),也可能落在参数里(id=$1),两边都要替换
+    const captured = m[1] ?? '';
+    const merged = new URLSearchParams(targetQuery.replace(/\$1/g, captured));
+    for (const [k, v] of url.searchParams) if (!merged.has(k)) merged.set(k, v);
+    url.pathname = path.replace(/\$1/g, captured);
+    url.search = merged.toString();
+    rewritten = true;
+    break;
+  }
+  if (!rewritten) return request;
   // 传原 request 作为 init:method / headers / body 都被继承,只有 URL 变了
   return new Request(url.toString(), request);
 }

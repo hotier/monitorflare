@@ -100,7 +100,7 @@
         </div>
         <div class="mt-3 flex items-center justify-between text-xs text-slate-400 dark:text-slate-600">
           <span v-if="subMsg" :class="subOk ? 'text-emerald-500' : 'text-red-500'">{{ subMsg }}</span>
-          <a :href="`${API_BASE}/feed.xml`" target="_blank" class="flex items-center gap-1.5 hover:text-emerald-500 transition-colors">
+          <a :href="EP.feed()" target="_blank" class="flex items-center gap-1.5 hover:text-emerald-500 transition-colors">
             <i class="fas fa-rss text-orange-500"></i> {{ $t('statusPage.rssFeed') }}
           </a>
         </div>
@@ -119,7 +119,8 @@ defineOptions({ name: 'StatusPage' });
 import { ref, computed, onMounted, onActivated, onDeactivated, onUnmounted } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useTheme } from '../composables/useTheme';
-import { API_BASE, fetchT, isStatusLocked, statusLogout, STATUS_TOKEN_KEY } from '../utils/api';
+import { fetchT, isStatusLocked, statusLogout, STATUS_TOKEN_KEY } from '../utils/api';
+import { EP } from '../utils/endpoints';
 import { formatDate, formatNow } from '../utils/format';
 // 跨页共享的数据。这些资源是模块级的,切页不会丢 —— 有数据时 loading 保持 false,
 // 所以从详情页/管理页切回来是直接渲染,不再闪骨架屏。
@@ -256,7 +257,9 @@ const subscribe = async () => {
     }
     subscribing.value = true;
     try {
-        const r = await fetchT(`${API_BASE}/api/subscribe`, {
+        // 这里一度写成 ${API_BASE}/api/subscribe,打到了 /api/api/subscribe:
+        // 入口只剥一层 /api,多出来的那层没有对应路由,订阅一直是 404。
+        const r = await fetchT(EP.subscribe(), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ email: subEmail.value }),

@@ -312,7 +312,8 @@ import { computed, ref } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useToast } from '../../composables/useToast';
 import { useConfirm } from '../../composables/useConfirm';
-import { API_BASE, authFetchT } from '../../utils/api';
+import { authFetchT } from '../../utils/api';
+import { EP } from '../../utils/endpoints';
 import * as resources from '../../composables/resources';
 import AppSelect from '../common/AppSelect.vue';
 
@@ -428,7 +429,7 @@ const saveCh = async () => {
     if (!ch.id && missing.length) { addToast(t('channels.fillConfig'), 'error'); return; }
     saving.value = true;
     try {
-        const url = ch.id ? `${API_BASE}/notification-channels/${ch.id}` : `${API_BASE}/notification-channels`;
+        const url = ch.id ? EP.channel(ch.id) : EP.channels();
         // '' 表示跟随默认模板,否则带上具体模板 id
         const versionId = Number(ch.template_version_id) > 0 ? Number(ch.template_version_id) : null;
         const body = ch.id
@@ -470,7 +471,7 @@ const deleteCh = async (ch) => {
     if (!ok) return;
     deletingId.value = ch.id;
     try {
-        const res = await authFetchT(`${API_BASE}/notification-channels/${ch.id}`, { method: 'DELETE' });
+        const res = await authFetchT(EP.channel(ch.id), { method: 'DELETE' });
         if (res.ok) {
             addToast(t('channels.deleted'), 'success');
             if (editing.value?.id === ch.id) editing.value = null;
@@ -489,7 +490,7 @@ const toggleCh = async (ch) => {
     togglingId.value = ch.id;
     try {
         const enabled = isEnabled(ch) ? 0 : 1;
-        const res = await authFetchT(`${API_BASE}/notification-channels/${ch.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled }) });
+        const res = await authFetchT(EP.channel(ch.id), { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled }) });
         if (res.ok) ch.enabled = enabled;
         else addToast(t('channels.operationFailed'), 'error');
     } catch {
@@ -503,7 +504,7 @@ const testCh = async (ch) => {
     testingId.value = ch.id;
     addToast(t('channels.testing'), 'info');
     try {
-        const res = await authFetchT(`${API_BASE}/notification-channels/${ch.id}?action=test`, { method: 'POST' });
+        const res = await authFetchT(EP.channel(ch.id, { action: 'test' }), { method: 'POST' });
         const d = await res.json();
         addToast(d.success ? t('channels.testSent') : t('channels.testFailed'), d.success ? 'success' : 'error');
     } catch {
@@ -516,7 +517,7 @@ const testCh = async (ch) => {
 /** 模板列表只用来做下拉和卡片上的"用哪份文案"展示,拉不到也不该挡住渠道配置 */
 const loadTemplateVersions = async () => {
     try {
-        const res = await authFetchT(`${API_BASE}/alert-templates`);
+        const res = await authFetchT(EP.templates());
         if (res.ok) {
             const d = await res.json();
             templateVersions.value = d.versions || [];

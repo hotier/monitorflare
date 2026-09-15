@@ -146,7 +146,8 @@ import { useToast } from '../composables/useToast';
 import { useConfirm } from '../composables/useConfirm';
 // authFetchT = 带 Bearer 头 + 统一 401 处理(清 session 并回登录页)。
 // 原先只有本页内部的 authFetch 做了 401 处理,提到 utils/api 里共享,各弹窗行为一致。
-import { API_BASE, authFetchT, ADMIN_TOKEN_KEY } from '../utils/api';
+import { authFetchT, ADMIN_TOKEN_KEY } from '../utils/api';
+import { EP } from '../utils/endpoints';
 import { formatDateFull } from '../utils/format';
 // 列表、自检、站点配置都提到模块级资源,切页回来直接渲染缓存
 import * as resources from '../composables/resources';
@@ -181,7 +182,7 @@ const footerUrl = import.meta.env.VITE_FOOTER_URL || '#';
 const EMPTY_SETTINGS = {};
 
 /**
- * 监控列表 = 管理端配置(/monitors) + 公开状态数据(/monitors/public?detail=1)
+ * 监控列表 = 管理端配置(/monitors) + 公开状态数据(/monitors?scope=public&detail=1)
  *
  * 注意这里返回的是**新对象**(展开合并),不像以前那样就地往 adminData 的元素上挂
  * _latency/_sparkData。原因是 computed 每次重算都会重建数组,任何"挂在监控对象上的
@@ -369,7 +370,7 @@ const addMonitor = async () => {
             config = JSON.stringify({ port: portNum });
         }
         const body = { ...rest, type, config, check_ssl: newMonitor.value.check_ssl ? 1 : 0, check_domain: newMonitor.value.check_domain ? 1 : 0, interval: Number(newMonitor.value.interval) };
-        const res = await authFetchT(`${API_BASE}/monitors`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        const res = await authFetchT(EP.monitors(), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
         if (res.ok) {
             const created = await res.json();
             newMonitor.value = { name: '', url: '', type: 'http', record_type: 'A', expected: '', port: 443, method: 'GET', keyword: '', user_agent: '', tags: '', request_headers: '', request_body: '', interval: 300, check_ssl: true, check_domain: true, alert_silence_uptime: 24, alert_error_rate: 0, alert_latency_ms: 0 };
@@ -387,7 +388,7 @@ const addMonitor = async () => {
 // ── 删除 ──
 const deleteMonitor = async (m) => {
     const ok = await confirmDialog(t('adminPage.confirmDelete', { name: m.name })); if (!ok) return;
-    try { const res = await authFetchT(`${API_BASE}/monitors/${m.id}`, { method: 'DELETE' }); if (res.ok) { addToast(t('adminPage.deleted', { name: m.name }), 'success'); reloadMonitors(); } else { addToast(t('common.deleteFailed'), 'error'); } } catch { addToast(t('common.networkError'), 'error'); }
+    try { const res = await authFetchT(EP.monitor(m.id), { method: 'DELETE' }); if (res.ok) { addToast(t('adminPage.deleted', { name: m.name }), 'success'); reloadMonitors(); } else { addToast(t('common.deleteFailed'), 'error'); } } catch { addToast(t('common.networkError'), 'error'); }
 };
 
 // ── 手动检测 ──
@@ -395,13 +396,13 @@ const forceCheck = async (m) => {
     // 用 id 集合判重,不再往监控对象上挂 _checking:列表是 computed 出来的,对象会被重建
     if (checkingIds.has(m.id)) return;
     checkingIds.add(m.id);
-    try { const res = await authFetchT(`${API_BASE}/monitors/${m.id}?action=check`, { method: 'POST' }); if (res.ok) { addToast(t('adminPage.updated', { name: m.name }), 'success'); reloadMonitors(); } } catch { addToast(t('common.networkError'), 'error'); }
+    try { const res = await authFetchT(EP.monitor(m.id, { action: 'check' }), { method: 'POST' }); if (res.ok) { addToast(t('adminPage.updated', { name: m.name }), 'success'); reloadMonitors(); } } catch { addToast(t('common.networkError'), 'error'); }
     finally { checkingIds.delete(m.id); }
 };
 
 // ── 暂停/恢复 ──
 const togglePause = async (m) => {
-    try { const res = await authFetchT(`${API_BASE}/monitors/${m.id}?action=pause`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ paused: m.paused ? 0 : 1 }) }); if (res.ok) { const d = await res.json(); addToast(d.paused ? t('adminPage.paused', { name: m.name }) : t('adminPage.resumed', { name: m.name }), 'info'); reloadMonitors(); } else { addToast(t('common.actionFailed'), 'error'); } } catch { addToast(t('common.networkError'), 'error'); }
+    try { const res = await authFetchT(EP.monitor(m.id, { action: 'pause' }), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ paused: m.paused ? 0 : 1 }) }); if (res.ok) { const d = await res.json(); addToast(d.paused ? t('adminPage.paused', { name: m.name }) : t('adminPage.resumed', { name: m.name }), 'info'); reloadMonitors(); } else { addToast(t('common.actionFailed'), 'error'); } } catch { addToast(t('common.networkError'), 'error'); }
 };
 
 // ── 克隆 ──
@@ -438,7 +439,7 @@ const saveConfig = async () => {
     configSaving.value = true;
     try {
         const body = { name: configForm.value.name, url: configForm.value.url, method: configForm.value.method || 'GET', keyword: configForm.value.keyword, user_agent: configForm.value.user_agent, tags: configForm.value.tags || '', request_headers: configForm.value.request_headers || '', request_body: configForm.value.request_body || '', interval: Number(configForm.value.interval), check_ssl: configForm.value.check_ssl ? 1 : 0, check_domain: configForm.value.check_domain ? 1 : 0, alert_silence_uptime: Number(configForm.value.alert_silence_uptime), alert_silence_ssl: Number(configForm.value.alert_silence_ssl), alert_silence_domain: Number(configForm.value.alert_silence_domain), alert_error_rate: Number(configForm.value.alert_error_rate ?? 0), alert_latency_ms: Math.min(Math.max(Math.round(Number(configForm.value.alert_latency_ms) || 0), 0), 600000), alert_error_rate_window: toRuleOverride(configForm.value.alert_error_rate_window), alert_error_rate_min_samples: toRuleOverride(configForm.value.alert_error_rate_min_samples), alert_error_rate_silence: toRuleOverride(configForm.value.alert_error_rate_silence), alert_latency_silence: toRuleOverride(configForm.value.alert_latency_silence) };
-        const res = await authFetchT(`${API_BASE}/monitors/${configTarget.value.id}/config`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        const res = await authFetchT(EP.monitor(configTarget.value.id), { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
         if (res.ok) { addToast(t('adminPage.saved'), 'success'); showConfig.value = false; reloadMonitors(); }
         else { const d = await res.json(); addToast(d.error || t('common.saveFailed'), 'error'); }
     } catch { addToast(t('common.networkError'), 'error'); }
@@ -466,7 +467,7 @@ const viewLogs = async (monitor) => {
 
     logs.value = []; logOffset.value = 0; hasMoreLogs.value = false; logsLoading.value = true;
     try {
-        const res = await authFetchT(`${API_BASE}/monitors?id=${monitor.id}&include=logs&limit=${logLimit}&offset=0`);
+        const res = await authFetchT(EP.monitors({ id: monitor.id, include: 'logs', limit: logLimit, offset: 0 }));
         if (res.ok) {
             const d = await res.json();
             // 晚到的响应不能覆盖:用户可能已经点开另一个监控了
@@ -482,7 +483,7 @@ const viewLogs = async (monitor) => {
 const loadMoreLogs = async () => {
     if (!currentMonitor.value || logsLoading.value) return; logsLoading.value = true;
     try {
-        const res = await authFetchT(`${API_BASE}/monitors?id=${currentMonitor.value.id}&include=logs&limit=${logLimit}&offset=${logOffset.value}`);
+        const res = await authFetchT(EP.monitors({ id: currentMonitor.value.id, include: 'logs', limit: logLimit, offset: logOffset.value }));
         if (res.ok) {
             const d = await res.json();
             const rows = d.logs?.[currentMonitor.value.id] || [];
@@ -539,7 +540,7 @@ const batchAction = async (action) => {
     if (action === 'delete') { const ok = await confirmDialog(t('adminPage.batchConfirm', { count: selectedIds.value.length })); if (!ok) return; }
     if (action === 'check') batchChecking.value = true;
     try {
-        const res = await authFetchT(`${API_BASE}/monitors/batch`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action, ids: selectedIds.value }) });
+        const res = await authFetchT(EP.monitors({ action: 'batch' }), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action, ids: selectedIds.value }) });
         if (res.ok) {
             const d = await res.json();
             if (action === 'check') {
@@ -556,7 +557,7 @@ const batchAction = async (action) => {
 
 // ── 排序 ──
 const handleReorder = async (ids) => {
-    try { await authFetchT(`${API_BASE}/monitors/reorder`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids }) }); addToast(t('adminPage.orderSaved'), 'success'); reloadMonitors(); } catch { addToast(t('adminPage.orderSaveFailed'), 'error'); }
+    try { await authFetchT(EP.monitors({ action: 'reorder' }), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids }) }); addToast(t('adminPage.orderSaved'), 'success'); reloadMonitors(); } catch { addToast(t('adminPage.orderSaveFailed'), 'error'); }
 };
 
 // ── 键盘快捷键与轮询的启停 ──
