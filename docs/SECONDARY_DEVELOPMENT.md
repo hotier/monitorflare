@@ -732,11 +732,13 @@ worker/src/
 
 **三个必须注意的点**：
 
-1. **Hono 路由顺序敏感**，拆分后注册顺序必须与现在完全一致
-2. **双前缀注册**（`/api/status` + `/status`、`/api/v1` + `/v1`）不能漏
+1. **Hono 路由顺序敏感**，拆分后注册顺序必须与现在完全一致（静态路径先于参数路径）
+2. **`stripApiPrefix` 只保留一处**：它在 `index.ts` 的 `export default { fetch }` 里，
+   拆成多文件后要么留在入口、要么单独成模块后独占入口那一层 —— 放在某个 `routes/*.ts`
+   内部会漏掉其它路由的前缀重写
 3. **`safeCompare` 是安全相关**（常量时间比较），搬迁时不要"顺手优化"
 
-**验证方式**（纯搬迁的最大优势）：拆分前用 `curl` 打一组接口存为基线，拆分后重打一遍做 diff。建议覆盖：`/health`、`/monitors/public/details`、`/api/status`、`/status`、`/feed.xml`、`/monitors`、`/backup`。
+**验证方式**（纯搬迁的最大优势）：拆分前用 `curl` 打一组接口存为基线，拆分后重打一遍做 diff。建议覆盖：`/health`、`/monitors/public/details`、`/status`、`/feed.xml`、`/monitors`、`/backup`，并对 `/api/` 与裸路径各打一遍确认等价。
 
 **影响面**：1 个文件变 16 个，无逻辑变更。
 
@@ -764,7 +766,7 @@ worker/src/
 |---|---|---|---|
 | 1 | **无测试、无 lint** | 改 1500 行的 `index.ts` 极易失控 | 先做阶段 0 |
 | 2 | **路由顺序敏感** | 调整注册顺序可能导致 404 或错误匹配 | 拆分时严格保持原顺序；`/monitors/public/details` 与 `/monitors/:id` 类冲突要特别小心 |
-| 3 | **双前缀注册遗漏** | 线上 404（本地正常） | 新增/搬迁路由后逐一核对 §4.1 的三类例外 |
+| 3 | **前缀重写被绕过** | 线上 404（本地正常） | 路由只注册裸路径，`/api/` 一律靠 `stripApiPrefix`（§4.1）重写，不要恢复成对注册 |
 | 4 | **DB 迁移只改 `schema.sql`** | 线上老库缺列，运行时报错 | 必须同时改 `init.ts` 的 `INIT_STATEMENTS` 和 `ensureColumn()` |
 | 5 | **浅色模式 `!important` hack** | 改任何组件配色都可能破坏浅色模式 | 本次不改配色，风险不触发；如后续要改，先按 §5.2 做 token 化再拆 hack |
 | 6 | **双 i18n 体系** | 只改一边导致告警消息或界面文案缺失 | 新增文案时同步 `locales/*.json`（en/zh 两个）与 `i18n.ts` |

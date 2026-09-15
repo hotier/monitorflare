@@ -110,10 +110,10 @@ import * as resources from '../composables/resources';
 | `adminMonitors` | `GET /monitors` | Bearer | 15 秒 | 否 |
 | `health` | `GET /health` | Bearer | 30 秒 | 否 |
 | `notificationChannels` | `GET /notification-channels` | Bearer | 60 秒 | 否 |
-| `allIncidents` | `GET /incidents/all` | Bearer | 30 秒 | 否 |
+| `allIncidents` | `GET /incidents?status=all` | Bearer | 30 秒 | 否 |
 | `apiKeys` | `GET /api-keys` | Bearer | 60 秒 | 否 |
 
-注意 `publicIncidents`（`GET /incidents`，只返回 `status = 'active'`）与 `allIncidents`（`GET /incidents/all`，管理员全量）是两个不同端点、不同用途的资源，不可合并。
+注意 `publicIncidents`（`GET /incidents`，只返回 `status = 'active'`）与 `allIncidents`（`GET /incidents?status=all`，管理员全量）是同一端点的两种口径、不同用途的资源，缓存 key 必须分开（原为 `/incidents` 与 `/incidents/all` 两个端点，合并后靠 `?status=` 区分）。
 
 **ttl 取值理由**：状态数据 15 秒（页面已有 30 秒轮询，ttl 只需覆盖"切走再切回"的间隔）；站点配置 5 分钟（几乎不变）；通知渠道与 API 密钥 60 秒（低频变更）。
 
@@ -347,7 +347,7 @@ const monitors = computed(() => {
 | 5 | 定时器/键盘监听重复注册或不释放 | keep-alive 下 `onUnmounted` 不触发，清理必须挂 `onDeactivated`；且首次进入时 `onMounted` 与 `onActivated` 会连续触发，start 必须幂等。详情页还有一层：两个钩子都会调 `loadDetail`，用 30 秒时间戳闸门去重 |
 | 6 | 详情页闪出"上一个监控的内容 + 当前 URL" | 实例被复用但数据没换。切 `:id` 时必须走 `resetFor()`，其中 `seriesCache` 尤其不能漏（按区间存，内容却属于上一个监控） |
 | 7 | 缓存忽然不再跨页共享 | 模块级单例的前提是打包器只保留一份。已验证 `monitorflare_snapshot_monitors` 在 `dist` 里只出现于一个共享 chunk。若将来把这几个模块手工拆进异步 chunk，方案即失效 |
-| 8 | 事件列表内容不对 | `/incidents`（公开，只返回 active）与 `/incidents/all`（管理端全量）是两个端点，必须是两个资源 |
+| 8 | 事件列表内容不对 | `/incidents`（公开，只返回 active）与 `/incidents?status=all`（管理端全量）口径不同，必须是两个资源（同一端点、两种 query） |
 | 9 | 用户刚输入的设置被冲掉 | `SettingsModal` 先用缓存填表再 `ensure()`，之后只有 `updatedAt` 变了才重新填表，避免后台刷新覆盖用户输入 |
 | 10 | 私密模式下仍能看到缓存内容 | 被 `locked` 挡下时顺手 `data = null` + `store.clear()`，否则站点从公开切成私密后，老访客冷加载会先渲染出缓存的公开内容、等 401 回来才切锁屏 |
 

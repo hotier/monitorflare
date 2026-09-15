@@ -94,7 +94,7 @@ CREATE TABLE IF NOT EXISTS monitor_hourly (
 | `/monitors/public/:id` | 30 天 logs 聚合 + 全表扫 | monitor(1) + 小时桶(25) + 日聚合(90) + 日志 50 条 |
 | `/api/status` | 30 天 logs 聚合 | monitors(N) + 小时桶(≤25N) |
 | `/health` | `COUNT(*) FROM logs` 全索引扫 | `MAX(id)`（O(1)）+ `ORDER BY id DESC LIMIT 1` |
-| `/monitors/:id/stats` | 30 天 logs 聚合 | 日聚合 + 小时桶 |
+| `/monitors?include=stats` | 30 天 logs 聚合 | 日聚合 + 小时桶 |
 
 关键写法改动：**所有 `date(created_at, 'tz')` 改为预先算好的边界常量比较**，确保命中 `idx_logs_monitor_created` / `PRIMARY KEY(monitor_id, hour|date)`。
 
